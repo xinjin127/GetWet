@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Launch Window</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <header class="app-header">
+          <div>
+            <p class="kicker">Ocean go / no-go</p>
+            <h1>Launch Window</h1>
+          </div>
+          <p class="weekend-chip">Upcoming weekend: <span data-weekend-range>Loading...</span></p>
+        </header>
+
+        <nav class="mode-tabs" aria-label="Mission mode">
+          <button class="mode-tab is-active" type="button" data-mode="crabbing">Crabbing</button>
+          <button class="mode-tab" type="button" data-mode="spearfishing">Spearfishing</button>
+        </nav>
+
+        <div id="mode-content" class="mode-content" aria-live="polite"></div>
+      </section>
+
+      <aside class="side-panel">
+        <section class="lock-preview" aria-label="Lock Screen preview">
+          <div class="phone-frame">
+            <div class="phone-status">
+              <span id="lock-time">7:18</span>
+              <span data-lock-weekend>Sat/Sun</span>
+            </div>
+            <div class="lock-widget" id="lock-widget"></div>
+          </div>
+        </section>
+
+        <section class="notes-card">
+          <h2>POC Behavior</h2>
+          <p>
+            Live public sources feed a conservative weekend mission plan. Missing or
+            unverified safety/legal inputs block a confident GO instead of being filled in.
+          </p>
+          <ul>
+            <li>Crabbing stays fixed to China Beach.</li>
+            <li>Spearfishing starts with one top option.</li>
+            <li>Extra candidates appear only when requested.</li>
+          </ul>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="disclaimer">
+      Proof of concept only. Do not use this prototype for ocean decisions. Production version
+      should harden NOAA/NWS marine forecasts, tide/current data, swell models, legal checks,
+      and user-defined safety thresholds.
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
