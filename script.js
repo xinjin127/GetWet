@@ -69,7 +69,7 @@ const missionConfig = {
     activity: "Beach-entry spearfishing",
     question: "What is the best beach-entry spearfishing option this upcoming Saturday/Sunday?",
     thresholds: {
-      go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
+      go: { maxWaveFeet: 4, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
       maybe: { maxWaveFeet: 6, maxWindMph: 14, maxSwellHeightFeet: 4, maxSwellPeriodSeconds: 16 }
     },
     candidates: [
@@ -224,7 +224,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v8";
+const CACHE_VERSION = "launch-window-v9";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
