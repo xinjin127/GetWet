@@ -68,6 +68,10 @@ const missionConfig = {
   spearfishing: {
     activity: "Beach-entry spearfishing",
     question: "What is the best beach-entry spearfishing option this upcoming Saturday/Sunday?",
+    thresholds: {
+      go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
+      maybe: { maxWaveFeet: 6, maxWindMph: 14, maxSwellHeightFeet: 4, maxSwellPeriodSeconds: 16 }
+    },
     candidates: [
       {
         id: "carmel_bay_stillwater_legal_zones",
@@ -220,7 +224,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v7";
+const CACHE_VERSION = "launch-window-v8";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -1063,32 +1067,36 @@ function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellP
 }
 
 function evaluateSpearfishingCandidate(candidate) {
-  const marineMorning = morningHours(candidate.marine);
-  const weatherMorning = morningHours(candidate.weather.periods);
-  const avgMorningWave = averageNumber(marineMorning.map((hour) => hour.waveHeight));
-  const maxMorningSwellPeriod = maxNumber(marineMorning.map((hour) => hour.swellPeriod || hour.wavePeriod));
-  const maxMorningWind = maxNumber(weatherMorning.map((period) => parseWindMph(period.windSpeed)));
+  const thresholds = missionConfig.spearfishing.thresholds;
+  const allMarine = candidate.marine;
+  const allWeather = candidate.weather.periods;
+  const windows = buildSpearfishingMorningWindows({ candidate, weather: allWeather, marine: allMarine, thresholds });
+  const selectedWindow = windows.find((window) => window.status === "go")
+    || windows.find((window) => window.status === "maybe")
+    || windows[0]
+    || null;
+  const marineMorning = morningHours(allMarine);
+  const weatherMorning = morningHours(allWeather);
+  const avgMorningWave = selectedWindow?.avgWave ?? averageNumber(marineMorning.map((hour) => hour.waveHeight));
+  const maxMorningSwellPeriod = selectedWindow?.maxSwellPeriod ?? maxNumber(marineMorning.map((hour) => hour.swellPeriod || hour.wavePeriod));
+  const maxMorningSwellHeight = selectedWindow?.maxSwellHeight ?? maxNumber(marineMorning.map((hour) => hour.swellHeight));
+  const maxMorningWind = selectedWindow?.maxWind ?? maxNumber(weatherMorning.map((period) => parseWindMph(period.windSpeed)));
   const hasAdvisory = candidate.alerts.length > 0;
-  const exposurePenalty = getExposurePenalty(candidate.exposure);
-  const researchRankBonus = Math.max(0, 7 - candidate.rank) * 1.5;
-  const physicalScore = 100
-    - (avgMorningWave ?? 8) * 12
-    - (maxMorningSwellPeriod ?? 18) * 2.5
-    - (maxMorningWind ?? 18) * 1.8
-    - exposurePenalty * 7
-    - (hasAdvisory ? 30 : 0)
-    + researchRankBonus;
+  const physicalScore = selectedWindow?.score ?? 0;
 
   let verdict = "NO GO THIS WEEKEND";
-  if (!hasAdvisory && physicalScore >= 35) verdict = "MAYBE SATURDAY";
-  if (!hasAdvisory && physicalScore >= 48 && candidate.legalStatus === "Known legal water assumed") verdict = "GO SATURDAY";
+  if (!hasAdvisory && selectedWindow?.status === "maybe") verdict = `MAYBE ${selectedWindow.dayName.toUpperCase()} MORNING`;
+  if (!hasAdvisory && selectedWindow?.status === "go" && candidate.legalStatus === "Known legal water assumed") verdict = `GO ${selectedWindow.dayName.toUpperCase()} MORNING`;
   const headlineReason = getSpearfishingHeadlineReason({
     hasAdvisory,
     alerts: candidate.alerts,
     avgMorningWave,
+    maxMorningWave: selectedWindow?.maxWave,
+    maxMorningSwellHeight,
     maxMorningSwellPeriod,
     maxMorningWind,
-    exposure: candidate.exposure
+    exposure: candidate.exposure,
+    selectedWindow
   });
 
   return {
@@ -1108,22 +1116,28 @@ function evaluateSpearfishingCandidate(candidate) {
     verdict,
     headlineVerdict: verdict.includes("NO GO") ? `NO GO: ${headlineReason}` : verdict,
     headlineReason,
-    bestWindow: "Saturday/Sunday morning, recheck day-of",
+    bestWindow: selectedWindow
+      ? `${selectedWindow.dayName} 6-11am ${selectedWindow.status === "go" ? "looks diveable" : selectedWindow.status === "maybe" ? "is marginal" : "does not clear the screen"}`
+      : "No Sat/Sun morning window found",
     returnBy: "Before late-morning wind and surge build",
     score: physicalScore,
     risks: {
-      surge: describeSurge(avgMorningWave, maxMorningSwellPeriod, candidate.exposure),
+      surge: describeSurge(selectedWindow?.maxWave ?? avgMorningWave, maxMorningSwellPeriod, candidate.exposure),
       visibility: inferVisibility(avgMorningWave, maxMorningSwellPeriod),
       legal: candidate.legalStatus,
       confidence: hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence"
     },
     reasons: buildSpearfishingReasons({
       avgMorningWave,
+      maxMorningWave: selectedWindow?.maxWave,
+      maxMorningSwellHeight,
       maxMorningSwellPeriod,
       maxMorningWind,
       hasAdvisory,
       alerts: candidate.alerts,
-      exposure: candidate.exposure
+      exposure: candidate.exposure,
+      selectedWindow,
+      thresholds
     }),
     tags: [
       candidate.region,
@@ -1134,12 +1148,89 @@ function evaluateSpearfishingCandidate(candidate) {
     sourceSummary: {
       waveSeries: buildWaveSeries(candidate.marine),
       windSeries: buildWindSeries(candidate.weather.periods),
+      morningWindows: windows,
+      selectedWindow,
       avgMorningWave,
+      maxMorningWave: selectedWindow?.maxWave,
+      maxMorningSwellHeight,
       maxMorningSwellPeriod,
       maxMorningWind,
       alerts: candidate.alerts
     }
   };
+}
+
+function buildSpearfishingMorningWindows({ candidate, weather, marine, thresholds }) {
+  return [weekend.saturday, weekend.sunday]
+    .map((date) => {
+      const weatherHours = morningHoursForDate(weather, date);
+      const marineHours = morningHoursForDate(marine, date);
+      const avgWave = averageNumber(marineHours.map((hour) => hour.waveHeight));
+      const maxWave = maxNumber(marineHours.map((hour) => hour.waveHeight));
+      const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
+      const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
+      const maxWind = maxNumber(weatherHours.map((period) => parseWindMph(period.windSpeed)));
+      const status = gradeSpearfishingWindow({
+        maxWind,
+        maxWave,
+        maxSwellPeriod,
+        maxSwellHeight,
+        thresholds
+      });
+      const score = scoreSpearfishingWindow({
+        status,
+        candidate,
+        avgWave,
+        maxWave,
+        maxSwellPeriod,
+        maxSwellHeight,
+        maxWind
+      });
+
+      return {
+        date,
+        dayName: date.toLocaleDateString(undefined, { weekday: "long" }),
+        avgWave,
+        maxWave,
+        maxSwellPeriod,
+        maxSwellHeight,
+        maxWind,
+        status,
+        score
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+function gradeSpearfishingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
+  if (!Number.isFinite(maxWind) || !Number.isFinite(maxWave) || !Number.isFinite(maxSwellPeriod)) return "no-go";
+  if (passesSpearfishingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.go })) return "go";
+  if (passesSpearfishingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.maybe })) return "maybe";
+  return "no-go";
+}
+
+function passesSpearfishingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
+  const pairedSwellBlock = Number.isFinite(maxSwellHeight)
+    && maxSwellHeight > thresholds.maxSwellHeightFeet
+    && maxSwellPeriod > thresholds.maxSwellPeriodSeconds;
+  return maxWave <= thresholds.maxWaveFeet
+    && maxWind <= thresholds.maxWindMph
+    && !pairedSwellBlock;
+}
+
+function scoreSpearfishingWindow({ status, candidate, avgWave, maxWave, maxSwellPeriod, maxSwellHeight, maxWind }) {
+  const statusBase = status === "go" ? 100 : status === "maybe" ? 65 : 20;
+  const rankBonus = Math.max(0, 7 - candidate.rank) * 1.8;
+  const exposurePenalty = getExposurePenalty(candidate.exposure) * 3;
+  const wavePenalty = (avgWave ?? maxWave ?? 8) * 3;
+  const windPenalty = (maxWind ?? 18) * 0.8;
+  const longSwellPenalty = Number.isFinite(maxSwellHeight)
+    && Number.isFinite(maxSwellPeriod)
+    && maxSwellHeight > 3
+    && maxSwellPeriod > 14
+    ? 12
+    : 0;
+  return statusBase + rankBonus - exposurePenalty - wavePenalty - windPenalty - longSwellPenalty;
 }
 
 function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus }) {
@@ -1342,11 +1433,13 @@ function getExposurePenalty(exposure) {
   return 3;
 }
 
-function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningSwellPeriod, maxMorningWind, exposure }) {
+function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, exposure, selectedWindow }) {
   if (hasAdvisory) return summarizeAlerts(alerts).toUpperCase();
-  if (avgMorningWave !== null && avgMorningWave > 3) return "HIGH ENTRY SURGE";
-  if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 12) return "LONG-PERIOD SURGE";
-  if (maxMorningWind !== null && maxMorningWind > 14) return "WIND CHOP";
+  if (selectedWindow?.status === "no-go" && maxMorningWave !== null && maxMorningWave > missionConfig.spearfishing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
+  if (selectedWindow?.status === "no-go" && maxMorningWind !== null && maxMorningWind > missionConfig.spearfishing.thresholds.maybe.maxWindMph) return "WIND CHOP";
+  if (maxMorningSwellHeight > missionConfig.spearfishing.thresholds.maybe.maxSwellHeightFeet
+    && maxMorningSwellPeriod > missionConfig.spearfishing.thresholds.maybe.maxSwellPeriodSeconds) return "LONG-PERIOD SURGE WITH SIZE";
+  if (avgMorningWave !== null && avgMorningWave > missionConfig.spearfishing.thresholds.maybe.maxWaveFeet) return "HIGH ENTRY SURGE";
   if (exposure === "open coast") return "OPEN-COAST EXPOSURE";
   return "SAFETY THRESHOLDS NOT MET";
 }
@@ -1354,33 +1447,43 @@ function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, ma
 function describeSurge(waveHeight, swellPeriod, exposure) {
   if (!Number.isFinite(waveHeight) || !Number.isFinite(swellPeriod)) return "Surge unknown";
   const exposed = exposure === "open coast" || exposure === "partial shelter";
-  if (waveHeight <= 2 && swellPeriod <= 10 && !exposed) return "Lower surge";
-  if (waveHeight <= 3 && swellPeriod <= 12) return "Moderate surge";
+  if (waveHeight <= 3 && swellPeriod <= 12 && !exposed) return "Lower surge";
+  if (waveHeight <= 5 && swellPeriod <= 14) return "Moderate surge";
   return "High surge";
 }
 
 function inferVisibility(waveHeight, swellPeriod) {
   if (!Number.isFinite(waveHeight) || !Number.isFinite(swellPeriod)) return "Unknown";
-  if (waveHeight <= 2 && swellPeriod <= 10) return "Probably better, unverified";
-  if (waveHeight <= 3) return "Uncertain";
+  if (waveHeight <= 3 && swellPeriod <= 12) return "Probably better, unverified";
+  if (waveHeight <= 5) return "Uncertain";
   return "Likely poor";
 }
 
-function buildSpearfishingReasons({ avgMorningWave, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, alerts, exposure }) {
+function buildSpearfishingReasons({ avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, alerts, exposure, selectedWindow, thresholds }) {
   const reasons = [];
   if (hasAdvisory) {
     reasons.push({ type: "bad", text: `NWS alert found near this candidate: ${summarizeAlerts(alerts)}.` });
   }
+  if (selectedWindow) {
+    reasons.push({
+      type: selectedWindow.status === "go" ? "good" : selectedWindow.status === "maybe" ? "warn" : "bad",
+      text: `Best individual morning is ${selectedWindow.dayName} 6-11am: max waves ${formatNumber(selectedWindow.maxWave, " ft")}, avg waves ${formatNumber(selectedWindow.avgWave, " ft")}, wind ${formatNumber(selectedWindow.maxWind, " mph")}, swell ${formatNumber(selectedWindow.maxSwellHeight, " ft")} at ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}.`
+    });
+  }
   reasons.push({
-    type: avgMorningWave <= 2 ? "good" : avgMorningWave <= 3 ? "warn" : "bad",
-    text: `Open-Meteo morning wave height averages ${formatNumber(avgMorningWave, " ft")}.`
+    type: maxMorningWave <= thresholds.go.maxWaveFeet ? "good" : maxMorningWave <= thresholds.maybe.maxWaveFeet ? "warn" : "bad",
+    text: `Spearfishing GO screen now allows up to ${formatNumber(thresholds.go.maxWaveFeet, " ft")} max morning waves at protected/legal spots; this selected window is ${formatNumber(maxMorningWave, " ft")}.`
   });
   reasons.push({
-    type: maxMorningSwellPeriod <= 10 ? "good" : maxMorningSwellPeriod <= 12 ? "warn" : "bad",
-    text: `Swell period reaches ${formatNumber(maxMorningSwellPeriod, " sec")}, which drives surge at entries and exits.`
+    type: Number.isFinite(maxMorningSwellHeight)
+      && Number.isFinite(maxMorningSwellPeriod)
+      && (maxMorningSwellHeight <= thresholds.go.maxSwellHeightFeet || maxMorningSwellPeriod <= thresholds.go.maxSwellPeriodSeconds)
+      ? "warn"
+      : "bad",
+    text: `Swell reaches ${formatNumber(maxMorningSwellHeight, " ft")} at ${formatNumber(maxMorningSwellPeriod, " sec")}; long period is a hard blocker only when paired with larger swell height.`
   });
   reasons.push({
-    type: maxMorningWind <= 10 ? "good" : maxMorningWind <= 14 ? "warn" : "bad",
+    type: maxMorningWind <= thresholds.go.maxWindMph ? "good" : maxMorningWind <= thresholds.maybe.maxWindMph ? "warn" : "bad",
     text: `NWS morning wind reaches ${formatNumber(maxMorningWind, " mph")}.`
   });
   reasons.push({
@@ -1856,7 +1959,7 @@ function getSpearfishingMetrics(item) {
     {
       label: "Surge risk",
       value: item.risks.surge,
-      detail: `Live marine forecast: avg morning waves ${formatNumber(item.sourceSummary.avgMorningWave, " ft")}, swell period ${formatNumber(item.sourceSummary.maxMorningSwellPeriod, " sec")}.`
+      detail: `Selected morning: max waves ${formatNumber(item.sourceSummary.maxMorningWave, " ft")}, avg waves ${formatNumber(item.sourceSummary.avgMorningWave, " ft")}, swell period ${formatNumber(item.sourceSummary.maxMorningSwellPeriod, " sec")}.`
     },
     {
       label: "Visibility estimate",
