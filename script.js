@@ -191,7 +191,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v4";
+const CACHE_VERSION = "launch-window-v5";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -423,7 +423,7 @@ async function fetchTides() {
     product: "predictions",
     datum: "MLLW",
     time_zone: "lst_ldt",
-    interval: "hilo",
+    interval: "h",
     units: "english",
     application: "LaunchWindow",
     format: "json"
@@ -1116,7 +1116,7 @@ function renderTideGraph(tideEvents) {
     <article class="graph-card">
       <div class="graph-header">
         <div>
-          <span>Tide curve</span>
+          <span>Hourly tide curve</span>
           <strong>${formatNumber(minTide, " ft")} low · ${formatNumber(maxTide, " ft")} high</strong>
         </div>
         <p>NOAA CO-OPS</p>
@@ -1132,6 +1132,7 @@ function renderTideGraph(tideEvents) {
         <text x="7" y="143" class="graph-axis-title">y: tide height ft MLLW</text>
         <polyline points="${points}" class="graph-tide-line"></polyline>
         ${events.map((event, index) => {
+          if (event.type !== "H" && event.type !== "L") return "";
           const x = 36 + (index / Math.max(1, events.length - 1)) * 220;
           const y = 100 - ((event.value - minTide) / range) * 76;
           return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4" class="${event.type === "H" ? "tide-high-dot" : "tide-low-dot"}"></circle>`;
@@ -1139,8 +1140,8 @@ function renderTideGraph(tideEvents) {
         ${tideTimeLabels}
       </svg>
       <div class="graph-legend">
-        <span><i class="legend-tide"></i>High/low predictions</span>
-        <span><i class="legend-low"></i>Low tide</span>
+        <span><i class="legend-tide"></i>Hourly NOAA predictions</span>
+        <span><i class="legend-low"></i>Marked high/low when supplied</span>
       </div>
     </article>
   `;
@@ -1214,11 +1215,43 @@ function renderCdfwCrabStatus(status) {
 
 function renderTides(tideEvents) {
   if (!tideEvents.length) return "";
+  const hourlyEvents = tideEvents
+    .map((event) => ({
+      time: new Date(event.t),
+      value: Number(event.v)
+    }))
+    .filter((event) => !Number.isNaN(event.time.getTime()) && Number.isFinite(event.value))
+    .sort((a, b) => a.time - b.time);
+  const saturdayEvents = hourlyEvents.filter((event) => event.time.toDateString() === weekend.saturday.toDateString());
+  const sundayEvents = hourlyEvents.filter((event) => event.time.toDateString() === weekend.sunday.toDateString());
+
+  if (!hourlyEvents.length) return "";
+
   return `
-    <div class="tide-strip">
-      ${tideEvents.slice(0, 8).map((event) => `
-        <span>${escapeHtml(event.type === "H" ? "High" : "Low")} ${escapeHtml(formatTimeLabel(event.t))} · ${escapeHtml(Number(event.v).toFixed(1))} ft</span>
-      `).join("")}
+    <section class="hourly-tide-panel">
+      <div class="hourly-tide-header">
+        <span>Hour-by-hour tides</span>
+        <strong>NOAA San Francisco Station ${escapeHtml(sourceConfig.tides.station)} · ft MLLW</strong>
+      </div>
+      ${renderHourlyTideDay("Saturday", saturdayEvents)}
+      ${renderHourlyTideDay("Sunday", sundayEvents)}
+    </section>
+  `;
+}
+
+function renderHourlyTideDay(label, events) {
+  if (!events.length) return "";
+  return `
+    <div class="hourly-tide-day">
+      <h3>${escapeHtml(label)}</h3>
+      <div class="hourly-tide-grid">
+        ${events.map((event) => `
+          <div class="hourly-tide-cell">
+            <span>${escapeHtml(event.time.toLocaleTimeString(undefined, { hour: "numeric" }))}</span>
+            <strong>${escapeHtml(event.value.toFixed(1))} ft</strong>
+          </div>
+        `).join("")}
+      </div>
     </div>
   `;
 }
