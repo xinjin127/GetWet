@@ -105,7 +105,7 @@ h3 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 5px;
   border: 1px solid var(--line);
@@ -279,6 +279,16 @@ h3 {
   display: block;
   color: var(--text);
   line-height: 1.25;
+}
+
+.graph-header em {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1.28;
 }
 
 .graph-header p {

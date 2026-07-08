@@ -5,6 +5,11 @@ const sourceConfig = {
     station: "9414290",
     link: "https://tidesandcurrents.noaa.gov/stationhome.html?id=9414290"
   },
+  lawsonsTides: {
+    name: "NOAA CO-OPS Point Reyes tide predictions",
+    station: "9415020",
+    link: "https://tidesandcurrents.noaa.gov/stationhome.html?id=9415020"
+  },
   nws: {
     name: "NOAA/NWS hourly forecast and active alerts",
     pointsUrl: "https://api.weather.gov/points",
@@ -16,6 +21,12 @@ const sourceConfig = {
     url: "https://marine-api.open-meteo.com/v1/marine",
     link: "https://open-meteo.com/en/docs/marine-weather-api"
   },
+  ndbc: {
+    name: "NDBC Buoy 46237 San Francisco Bar",
+    station: "46237",
+    detail: "San Francisco Bar, CA Waverider buoy",
+    link: "https://www.ndbc.noaa.gov/station_page.php?station=46237"
+  },
   cdfwCrab: {
     name: "CDFW Dungeness crab season and closure checks",
     healthUrl: "https://wildlife.ca.gov/Fishing/Ocean/Health-Advisories",
@@ -26,11 +37,17 @@ const sourceConfig = {
   },
   regulations: {
     name: "CDFW regulations and California fishing checks",
+    clamRegsUrl: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs",
+    cdphShellfishUrl: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx",
+    lawsonsClammingUrl: "https://www.lawsonslanding.com/clamming.html",
     links: [
       { label: "CDFW ocean sport fishing", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Fishing-Map" },
+      { label: "CDFW clam regulations", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs" },
       { label: "CDFW crab regulations", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs#crab" },
       { label: "CDFW Whale Safe Fisheries", url: "https://wildlife.ca.gov/Conservation/Marine/Whale-Safe-Fisheries" },
-      { label: "CDFW crab health advisories", url: "https://wildlife.ca.gov/Fishing/Ocean/Health-Advisories" }
+      { label: "CDFW crab health advisories", url: "https://wildlife.ca.gov/Fishing/Ocean/Health-Advisories" },
+      { label: "CDPH shellfish advisories", url: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx" },
+      { label: "Lawson's Landing clamming", url: "https://www.lawsonslanding.com/clamming.html" }
     ]
   }
 };
@@ -171,6 +188,18 @@ const missionConfig = {
         ]
       }
     ]
+  },
+  clamming: {
+    spot: "Lawson's Landing",
+    activity: "Tomales Bay clamming",
+    coords: { latitude: 38.2314, longitude: -122.9682 },
+    tideStation: "9415020",
+    question: "Is there a daylight low-tide clamming window at Lawson's Landing this upcoming Saturday or Sunday?",
+    thresholds: {
+      maxTideFeet: 0.5,
+      maxWindMph: 12,
+      maxWaveFeet: 4
+    }
   }
 };
 
@@ -191,7 +220,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v5";
+const CACHE_VERSION = "launch-window-v6";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -303,13 +332,19 @@ function summarizeServerCacheStats() {
 async function loadLiveData() {
   const crabbing = missionConfig.crabbing;
   const spearfishing = missionConfig.spearfishing;
+  const clamming = missionConfig.clamming;
 
-  const [tides, crabbingWeather, crabbingMarine, crabbingAlerts, cdfwCrabStatus, candidateResults] = await Promise.all([
-    fetchTides(),
+  const [tides, clammingTides, crabbingWeather, crabbingMarine, crabbingAlerts, cdfwCrabStatus, clammingWeather, clammingMarine, clammingAlerts, clammingStatus, candidateResults] = await Promise.all([
+    fetchTides({ station: sourceConfig.tides.station }),
+    fetchTides({ station: clamming.tideStation }),
     fetchNwsWeather(crabbing.coords),
     fetchMarineForecast(crabbing.coords),
     fetchAlerts(crabbing.coords),
     fetchCdfwCrabStatus(crabbing),
+    fetchNwsWeather(clamming.coords),
+    fetchMarineForecast(clamming.coords),
+    fetchAlerts(clamming.coords),
+    fetchClammingStatus(),
     Promise.all(spearfishing.candidates.map(async (candidate) => ({
       ...candidate,
       weather: await fetchNwsWeather(candidate.coords),
@@ -327,6 +362,15 @@ async function loadLiveData() {
     cdfwCrabStatus
   });
 
+  const clammingDecision = evaluateClamming({
+    config: clamming,
+    weather: clammingWeather,
+    marine: clammingMarine,
+    tides: clammingTides,
+    alerts: clammingAlerts,
+    clammingStatus
+  });
+
   const spearfishingDecisions = candidateResults
     .map((candidate) => evaluateSpearfishingCandidate(candidate))
     .sort((a, b) => b.score - a.score);
@@ -334,6 +378,7 @@ async function loadLiveData() {
   return {
     generatedAt: new Date(),
     crabbing: crabbingDecision,
+    clamming: clammingDecision,
     spearfishing: {
       question: spearfishing.question,
       topOption: spearfishingDecisions[0],
@@ -415,11 +460,11 @@ function formatCacheTime(value) {
   return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
-async function fetchTides() {
+async function fetchTides({ station }) {
   const params = new URLSearchParams({
     begin_date: toApiDate(weekend.saturday),
     end_date: toApiDate(weekend.sunday),
-    station: sourceConfig.tides.station,
+    station,
     product: "predictions",
     datum: "MLLW",
     time_zone: "lst_ldt",
@@ -430,6 +475,30 @@ async function fetchTides() {
   });
   const data = await fetchJson(`${sourceConfig.tides.url}?${params}`);
   return data.predictions || [];
+}
+
+async function fetchClammingStatus() {
+  const [cdfwResult, cdphResult, lawsonsResult] = await Promise.allSettled([
+    fetchText(sourceConfig.regulations.clamRegsUrl),
+    fetchText(sourceConfig.regulations.cdphShellfishUrl),
+    fetchText(sourceConfig.regulations.lawsonsClammingUrl)
+  ]);
+
+  return {
+    cdfw: cdfwResult.status === "fulfilled"
+      ? parseCdfwClamRules(cdfwResult.value)
+      : getCdfwClamRulesBaseline(),
+    cdph: cdphResult.status === "fulfilled"
+      ? parseCdphShellfishAdvisory(cdphResult.value)
+      : {
+        status: "Unverified",
+        detail: "CDPH shellfish advisory page could not be read automatically.",
+        sourceAvailable: false
+      },
+    lawsons: lawsonsResult.status === "fulfilled"
+      ? parseLawsonsClammingGuidance(lawsonsResult.value)
+      : getLawsonsClammingBaseline()
+  };
 }
 
 async function fetchNwsWeather(coords) {
@@ -582,6 +651,85 @@ function parseCdfwWhaleSafeStatus(html, rampZone) {
     status: "Unparsed",
     detail: `CDFW Whale Safe Fisheries was reachable, but Zone ${rampZone} trap status could not be parsed confidently.`,
     sourceAvailable: true
+  };
+}
+
+function parseCdfwClamRules(html) {
+  const text = normalizeText(html);
+  const clamSection = extractBetween(text, "29.20. Clams General.", "### Crustaceans") || text;
+  const hasDaylightRule = /one-half hour before sunrise to one-half hour after sunset/i.test(clamSection);
+  const hasHandGearRule = /hand-operated devices/i.test(clamSection);
+  const hasNoClosedSeasonRule = /no closed seasons, bag limits or size limits on saltwater clams/i.test(clamSection);
+
+  return {
+    status: hasDaylightRule && hasHandGearRule ? "Clam rules parsed" : "Clam rules unparsed",
+    detail: hasDaylightRule && hasHandGearRule
+      ? "CDFW clam rules parsed: daylight-only fishing hours and hand-operated clam gear are required."
+      : "CDFW clam rules page was reachable, but the daylight/gear language could not be parsed confidently.",
+    noClosedSeasonRule: hasNoClosedSeasonRule,
+    sourceAvailable: true
+  };
+}
+
+function getCdfwClamRulesBaseline() {
+  return {
+    status: "Clam rules baseline",
+    detail: "CDFW clam rules baseline applied from the official regulations page: daylight-only fishing hours and hand-operated clam gear are required.",
+    noClosedSeasonRule: true,
+    sourceAvailable: false
+  };
+}
+
+function parseCdphShellfishAdvisory(html) {
+  const text = normalizeText(html);
+  const marinIndex = text.search(/Marin County|Marin/i);
+  const advisoryNearMarin = marinIndex >= 0 ? text.slice(Math.max(0, marinIndex - 500), marinIndex + 900) : "";
+  const hasBivalveWarning = /(do not eat|not eat|warning|advisory|quarantine)/i.test(advisoryNearMarin)
+    && /(sport-harvested|recreational)/i.test(advisoryNearMarin)
+    && /(bivalve|clam|clams|mussel|mussels|oyster|oysters|scallop|scallops|shellfish)/i.test(advisoryNearMarin);
+  const pageMentionsShellfish = /(shellfish|bivalve|clam|mussel|oyster)/i.test(text);
+
+  if (hasBivalveWarning) {
+    return {
+      status: "Possible Marin shellfish advisory",
+      detail: "CDPH shellfish page contains advisory language near Marin/sport-harvested bivalve shellfish; the app blocks a GO until this is verified directly.",
+      sourceAvailable: true
+    };
+  }
+
+  return {
+    status: pageMentionsShellfish ? "No Marin advisory parsed" : "Shellfish status unparsed",
+    detail: pageMentionsShellfish
+      ? "CDPH shellfish page was reachable and no Marin bivalve advisory language was parsed automatically."
+      : "CDPH page was reachable, but shellfish advisory text could not be parsed confidently.",
+    sourceAvailable: true
+  };
+}
+
+function parseLawsonsClammingGuidance(html) {
+  const text = normalizeText(html);
+  const thresholdMatch = text.match(/0\.5 feet or lower/i);
+  const daylightMatch = /illegal outside of daylight hours/i.test(text);
+  const calmMatch = /calm \(?no wind or heavy surf\)?/i.test(text) || /no wind or heavy surf/i.test(text);
+
+  return {
+    status: thresholdMatch && daylightMatch ? "Lawson guidance parsed" : "Lawson guidance unparsed",
+    detail: thresholdMatch && daylightMatch
+      ? "Lawson's Landing guidance parsed: mudflats expose at 0.5 ft or lower, daylight is required, and calm wind/surf matters."
+      : "Lawson's Landing page was reachable, but the tide/daylight guidance could not be parsed confidently.",
+    tideThresholdFeet: thresholdMatch ? 0.5 : missionConfig.clamming.thresholds.maxTideFeet,
+    calmRequired: calmMatch,
+    sourceAvailable: true
+  };
+}
+
+function getLawsonsClammingBaseline() {
+  return {
+    status: "Lawson guidance baseline",
+    detail: "Lawson's Landing baseline applied from its clamming page: mudflats expose at 0.5 ft or lower, daylight is required, and calm wind/surf matters.",
+    tideThresholdFeet: missionConfig.clamming.thresholds.maxTideFeet,
+    calmRequired: true,
+    sourceAvailable: false
   };
 }
 
@@ -913,6 +1061,173 @@ function evaluateSpearfishingCandidate(candidate) {
   };
 }
 
+function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus }) {
+  const allWeather = weather.periods;
+  const allMarine = marine;
+  const lowTideWindows = buildClammingLowTideWindows(tides, clammingStatus.lawsons.tideThresholdFeet || config.thresholds.maxTideFeet);
+  const daylightWindows = lowTideWindows.filter((window) => window.isDaylight);
+  const bestWindowMatch = daylightWindows[0] || lowTideWindows[0] || null;
+  const windowWeather = bestWindowMatch ? getWeatherNearTime(allWeather, bestWindowMatch.time) : [];
+  const windowMarine = bestWindowMatch ? getMarineNearTime(allMarine, bestWindowMatch.time) : [];
+  const maxWindowWind = maxNumber(windowWeather.map((period) => parseWindMph(period.windSpeed)));
+  const maxWindowWave = maxNumber(windowMarine.map((hour) => hour.waveHeight));
+  const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
+  const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
+  const hasAdvisory = alerts.length > 0;
+  const shellfishBlocked = clammingStatus.cdph.status === "Possible Marin shellfish advisory"
+    || clammingStatus.cdph.status === "Unverified"
+    || clammingStatus.cdph.status === "Shellfish status unparsed";
+  const rulesParsed = ["Clam rules parsed", "Clam rules baseline"].includes(clammingStatus.cdfw.status)
+    && ["Lawson guidance parsed", "Lawson guidance baseline"].includes(clammingStatus.lawsons.status);
+  const hasGoodTide = Boolean(daylightWindows.length);
+  const calmEnough = maxWindowWind !== null
+    && maxWindowWave !== null
+    && maxWindowWind <= config.thresholds.maxWindMph
+    && maxWindowWave <= config.thresholds.maxWaveFeet;
+
+  let verdict = "NO GO THIS WEEKEND";
+  if (hasGoodTide && calmEnough && !hasAdvisory && !shellfishBlocked && rulesParsed) {
+    verdict = "GO FOR LOW TIDE";
+  } else if (hasGoodTide && !shellfishBlocked && rulesParsed && !hasAdvisory) {
+    verdict = "MAYBE LOW TIDE";
+  }
+
+  const headlineReason = getClammingHeadlineReason({
+    shellfishBlocked,
+    rulesParsed,
+    hasGoodTide,
+    bestWindowMatch,
+    maxWindowWind,
+    maxWindowWave,
+    hasAdvisory
+  });
+
+  return {
+    spot: config.spot,
+    activity: config.activity,
+    question: config.question,
+    verdict,
+    headlineVerdict: verdict.includes("NO GO") ? `NO GO: ${headlineReason}` : verdict,
+    headlineReason,
+    bestWindow: bestWindowMatch
+      ? `${formatTimeLabel(bestWindowMatch.time)} at ${formatNumber(bestWindowMatch.tideFeet, " ft")}`
+      : "No tide at or below 0.5 ft found",
+    returnBy: bestWindowMatch
+      ? "Leave the flats before the tide refills and before daylight fades"
+      : null,
+    sourceSummary: {
+      tideEvents: tides,
+      waveSeries: buildWaveSeries(allMarine),
+      windSeries: buildWindSeries(allWeather),
+      lowTideWindows,
+      daylightWindows,
+      maxWindowWind,
+      maxWindowWave,
+      maxWeekendWind,
+      maxWeekendWave,
+      alerts,
+      clammingStatus
+    },
+    risks: {
+      tideAccess: hasGoodTide ? "Exposes mudflats" : "No daylight exposure",
+      windMudflat: calmEnough ? "Calm enough window" : "Wind/surf can erase the window",
+      shellfishHealth: clammingStatus.cdph.status,
+      confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded"
+    },
+    reasons: buildClammingReasons({
+      clammingStatus,
+      lowTideWindows,
+      daylightWindows,
+      maxWindowWind,
+      maxWindowWave,
+      maxWeekendWind,
+      maxWeekendWave,
+      alerts
+    }),
+    legalReminder: "Clamming check assumes the user has a valid California fishing license, legal access/parking, separate personal container, and will verify species-specific limits and same-day CDPH shellfish advisories before digging."
+  };
+}
+
+function buildClammingLowTideWindows(tideEvents, thresholdFeet) {
+  return (tideEvents || [])
+    .map((event) => ({
+      time: new Date(event.t),
+      tideFeet: Number(event.v)
+    }))
+    .filter((event) => !Number.isNaN(event.time.getTime()) && Number.isFinite(event.tideFeet))
+    .filter((event) => event.tideFeet <= thresholdFeet)
+    .map((event) => ({
+      ...event,
+      isDaylight: isClammingDaylight(event.time)
+    }))
+    .sort((a, b) => a.time - b.time);
+}
+
+function isClammingDaylight(date) {
+  const hour = date.getHours();
+  return hour >= 6 && hour <= 20;
+}
+
+function getWeatherNearTime(periods, time) {
+  const target = new Date(time).getTime();
+  return (periods || []).filter((period) => Math.abs(new Date(period.startTime).getTime() - target) <= 2 * 60 * 60 * 1000);
+}
+
+function getMarineNearTime(hours, time) {
+  const target = new Date(time).getTime();
+  return (hours || []).filter((hour) => Math.abs(new Date(hour.startTime).getTime() - target) <= 2 * 60 * 60 * 1000);
+}
+
+function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, hasAdvisory }) {
+  if (hasAdvisory) return "ACTIVE MARINE ALERT";
+  if (shellfishBlocked) return "CDPH SHELLFISH STATUS NOT VERIFIED";
+  if (!rulesParsed) return "LEGAL/SITE CHECK INCOMPLETE";
+  if (!bestWindowMatch) return "NO LOW TIDE EXPOSURE";
+  if (!hasGoodTide) return "LOW TIDE OUTSIDE DAYLIGHT";
+  if (maxWindowWind !== null && maxWindowWind > missionConfig.clamming.thresholds.maxWindMph) return "WIND TOO HIGH";
+  if (maxWindowWave !== null && maxWindowWave > missionConfig.clamming.thresholds.maxWaveFeet) return "SURF TOO HEAVY";
+  return "CONSERVATIVE THRESHOLDS NOT MET";
+}
+
+function buildClammingReasons({ clammingStatus, lowTideWindows, daylightWindows, maxWindowWind, maxWindowWave, maxWeekendWind, maxWeekendWave, alerts }) {
+  const reasons = [];
+  const bestWindow = daylightWindows[0] || lowTideWindows[0] || null;
+  reasons.push({
+    type: daylightWindows.length ? "good" : "bad",
+    text: daylightWindows.length
+      ? `NOAA tide check found ${daylightWindows.length} daylight hourly prediction(s) at or below ${formatNumber(clammingStatus.lawsons.tideThresholdFeet || 0.5, " ft")}; first is ${formatTimeLabel(bestWindow.time)} at ${formatNumber(bestWindow.tideFeet, " ft")}.`
+      : `NOAA tide check found no daylight hourly predictions at or below ${formatNumber(clammingStatus.lawsons.tideThresholdFeet || 0.5, " ft")}.`
+  });
+  reasons.push({
+    type: clammingStatus.lawsons.status === "Lawson guidance parsed" ? "good" : "warn",
+    text: clammingStatus.lawsons.detail
+  });
+  reasons.push({
+    type: clammingStatus.cdfw.status === "Clam rules parsed" ? "good" : "warn",
+    text: clammingStatus.cdfw.detail
+  });
+  reasons.push({
+    type: clammingStatus.cdph.status === "Possible Marin shellfish advisory" ? "bad" : clammingStatus.cdph.status === "Unverified" ? "warn" : "good",
+    text: clammingStatus.cdph.detail
+  });
+  if (alerts.length) {
+    reasons.push({ type: "bad", text: `NWS alert screen returned ${summarizeAlerts(alerts)} for Lawson's Landing.` });
+  }
+  reasons.push({
+    type: maxWindowWind !== null && maxWindowWind <= missionConfig.clamming.thresholds.maxWindMph ? "good" : "bad",
+    text: `Wind near the selected low-tide window reaches ${formatNumber(maxWindowWind, " mph")}; Lawson's guidance says calm/no-wind conditions matter.`
+  });
+  reasons.push({
+    type: maxWindowWave !== null && maxWindowWave <= missionConfig.clamming.thresholds.maxWaveFeet ? "good" : "warn",
+    text: `Open-Meteo marine forecast has nearby wave height around ${formatNumber(maxWindowWave, " ft")} at the selected window; weekend peak is ${formatNumber(maxWeekendWave, " ft")}.`
+  });
+  reasons.push({
+    type: "warn",
+    text: `Weekend peak wind is ${formatNumber(maxWeekendWind, " mph")}; reserve parking/access and recheck CDPH shellfish status day-of.`
+  });
+  return reasons;
+}
+
 function buildWaveSeries(hours) {
   return (hours || [])
     .filter((hour) => isWeekendDate(new Date(hour.startTime)))
@@ -1065,6 +1380,7 @@ function renderSurfGraph(waveSeries, windSeries) {
         <div>
           <span>Surf trend</span>
           <strong>${formatNumber(maxWave, " ft")} max waves · ${formatNumber(maxPeriod, " sec")} max period</strong>
+          <em>${escapeHtml(sourceConfig.ndbc.name)} reference · forecast grid from ${escapeHtml(sourceConfig.marine.name)}</em>
         </div>
         <p>${formatNumber(maxWind, " mph")} max wind</p>
       </div>
@@ -1191,10 +1507,20 @@ function renderSourceLinks() {
       <p class="cache-note">${escapeHtml(appState.cache.detail || "Server cache enabled")}</p>
       <a href="${sourceConfig.nws.link}" target="_blank" rel="noreferrer">${sourceConfig.nws.name}</a>
       <a href="${sourceConfig.tides.link}" target="_blank" rel="noreferrer">${sourceConfig.tides.name}</a>
+      <a href="${sourceConfig.lawsonsTides.link}" target="_blank" rel="noreferrer">${sourceConfig.lawsonsTides.name}</a>
+      <a href="${sourceConfig.ndbc.link}" target="_blank" rel="noreferrer">${sourceConfig.ndbc.name}</a>
       <a href="${sourceConfig.marine.link}" target="_blank" rel="noreferrer">${sourceConfig.marine.name}</a>
       ${sourceConfig.regulations.links.map((link) => `<a href="${link.url}" target="_blank" rel="noreferrer">${link.label}</a>`).join("")}
     </section>
   `;
+}
+
+function getWaterSourceMetric(tideSource) {
+  return {
+    label: "Water data source",
+    value: `${sourceConfig.ndbc.station} buoy / ${tideSource.station} tide`,
+    detail: `${sourceConfig.ndbc.detail} is shown as the offshore wave reference; hourly tides use ${tideSource.name}. Wave forecasts are pulled from the Open-Meteo marine grid at the selected spot coordinates.`
+  };
 }
 
 function renderCdfwCrabStatus(status) {
@@ -1213,7 +1539,7 @@ function renderCdfwCrabStatus(status) {
   `;
 }
 
-function renderTides(tideEvents) {
+function renderTides(tideEvents, tideSource = sourceConfig.tides) {
   if (!tideEvents.length) return "";
   const hourlyEvents = tideEvents
     .map((event) => ({
@@ -1231,7 +1557,7 @@ function renderTides(tideEvents) {
     <section class="hourly-tide-panel">
       <div class="hourly-tide-header">
         <span>Hour-by-hour tides</span>
-        <strong>NOAA San Francisco Station ${escapeHtml(sourceConfig.tides.station)} · ft MLLW</strong>
+        <strong>${escapeHtml(tideSource.name)} · Station ${escapeHtml(tideSource.station)} · ft MLLW</strong>
       </div>
       ${renderHourlyTideDay("Saturday", saturdayEvents)}
       ${renderHourlyTideDay("Sunday", sundayEvents)}
@@ -1304,7 +1630,7 @@ function renderSourceList(sourceUrls = []) {
   `;
 }
 
-function renderDecisionCard({ item, question, extraMetrics = [], legalReminder = "", tideEvents = [] }) {
+function renderDecisionCard({ item, question, extraMetrics = [], legalReminder = "", tideEvents = [], tideSource = sourceConfig.tides }) {
   const headlineVerdict = item.headlineVerdict || item.verdict;
   const metrics = [
     {
@@ -1341,7 +1667,7 @@ function renderDecisionCard({ item, question, extraMetrics = [], legalReminder =
       </div>
       ${renderMetrics(metrics)}
       ${renderConditionGraphs(item, tideEvents)}
-      ${renderTides(tideEvents)}
+      ${renderTides(tideEvents, tideSource)}
       ${renderSpotDetails(item)}
       ${renderReasons(item.reasons)}
       ${legalReminder ? `<p class="legal-note">${escapeHtml(legalReminder)}</p>` : ""}
@@ -1359,7 +1685,9 @@ function renderCrabbing() {
       question: data.question,
       legalReminder: data.legalReminder,
       tideEvents: data.sourceSummary.tideEvents,
+      tideSource: sourceConfig.tides,
       extraMetrics: [
+        getWaterSourceMetric(sourceConfig.tides),
         {
           label: "Entry / exit risk",
           value: data.risks.entryExit,
@@ -1389,8 +1717,56 @@ function renderCrabbing() {
   `;
 }
 
+function renderClamming() {
+  const data = appState.data.clamming;
+  const summary = data.sourceSummary;
+  return `
+    ${renderDecisionCard({
+      item: data,
+      question: data.question,
+      legalReminder: data.legalReminder,
+      tideEvents: summary.tideEvents,
+      tideSource: sourceConfig.lawsonsTides,
+      extraMetrics: [
+        getWaterSourceMetric(sourceConfig.lawsonsTides),
+        {
+          label: "Low tide access",
+          value: data.risks.tideAccess,
+          detail: summary.daylightWindows.length
+            ? `${summary.daylightWindows.length} daylight hourly prediction(s) at or below ${formatNumber(summary.clammingStatus.lawsons.tideThresholdFeet || 0.5, " ft")}.`
+            : "No daylight hourly prediction met Lawson's 0.5 ft exposure threshold."
+        },
+        {
+          label: "Wind / surf",
+          value: data.risks.windMudflat,
+          detail: `Selected-window wind ${formatNumber(summary.maxWindowWind, " mph")}; nearby wave height ${formatNumber(summary.maxWindowWave, " ft")}.`
+        },
+        {
+          label: "Shellfish health",
+          value: data.risks.shellfishHealth,
+          detail: summary.clammingStatus.cdph.detail
+        },
+        {
+          label: "CDFW / site rules",
+          value: summary.clammingStatus.cdfw.status,
+          detail: `${summary.clammingStatus.cdfw.detail} ${summary.clammingStatus.lawsons.detail}`
+        },
+        {
+          label: "Confidence",
+          value: data.risks.confidence,
+          detail: summary.alerts.length
+            ? `The NWS alert check independently returned ${summarizeAlerts(summary.alerts)} for the area.`
+            : "NOAA tide, NWS wind/alerts, Open-Meteo marine, CDFW, CDPH, and Lawson source checks returned for this card."
+        }
+      ]
+    })}
+    ${renderSourceLinks()}
+  `;
+}
+
 function getSpearfishingMetrics(item) {
   return [
+    getWaterSourceMetric(sourceConfig.tides),
     {
       label: "Region / drive",
       value: `${item.region} · ${item.driveHours} hr from SF`,
@@ -1452,6 +1828,13 @@ function renderSpearfishing() {
   `;
 }
 
+function renderActiveMode() {
+  if (appState.activeMode === "crabbing") return renderCrabbing();
+  if (appState.activeMode === "spearfishing") return renderSpearfishing();
+  if (appState.activeMode === "clamming") return renderClamming();
+  return renderCrabbing();
+}
+
 function renderLoading() {
   return `
     <article class="decision-card">
@@ -1498,8 +1881,15 @@ function renderLockPreview() {
   if (appState.status === "ready") {
     const item = appState.activeMode === "crabbing"
       ? appState.data.crabbing
-      : appState.data.spearfishing.topOption;
-    title = appState.activeMode === "crabbing" ? `Crabbing · ${item.spot}` : `Spearfishing · ${item.spot}`;
+      : appState.activeMode === "clamming"
+        ? appState.data.clamming
+        : appState.data.spearfishing.topOption;
+    const modeLabel = appState.activeMode === "crabbing"
+      ? "Crabbing"
+      : appState.activeMode === "clamming"
+        ? "Clamming"
+        : "Spearfishing";
+    title = `${modeLabel} · ${item.spot}`;
     verdict = (item.headlineVerdict || item.verdict).replace("THIS WEEKEND", "weekend");
     detail = `${item.bestWindow}. ${item.risks.legal || item.risks.windDrift || ""}`;
   }
@@ -1527,7 +1917,7 @@ function render() {
   } else if (appState.status === "error") {
     content.innerHTML = renderError();
   } else {
-    content.innerHTML = appState.activeMode === "crabbing" ? renderCrabbing() : renderSpearfishing();
+    content.innerHTML = renderActiveMode();
   }
 
   renderLockPreview();

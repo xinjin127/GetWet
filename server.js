@@ -12,7 +12,9 @@ const ALLOWED_HOSTS = new Set([
   "api.weather.gov",
   "api.tidesandcurrents.noaa.gov",
   "marine-api.open-meteo.com",
-  "wildlife.ca.gov"
+  "wildlife.ca.gov",
+  "www.cdph.ca.gov",
+  "www.lawsonslanding.com"
 ]);
 
 const MIME_TYPES = {
