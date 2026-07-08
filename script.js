@@ -61,8 +61,8 @@ const missionConfig = {
     cdfwRampZone: "4",
     question: "Can I crab from a paddleboard or kayak at China Beach this upcoming Saturday or Sunday?",
     thresholds: {
-      go: { maxWaveFeet: 2, maxSwellPeriodSeconds: 10, maxWindMph: 8 },
-      maybe: { maxWaveFeet: 3, maxSwellPeriodSeconds: 12, maxWindMph: 11 }
+      go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
+      maybe: { maxWaveFeet: 6, maxWindMph: 14, maxSwellHeightFeet: 4, maxSwellPeriodSeconds: 16 }
     }
   },
   spearfishing: {
@@ -220,7 +220,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v6";
+const CACHE_VERSION = "launch-window-v7";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -832,40 +832,31 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   const maxMorningWind = maxNumber(weatherMorning.map((period) => parseWindMph(period.windSpeed)));
   const maxMorningWave = maxNumber(marineMorning.map((hour) => hour.waveHeight));
   const maxMorningSwellPeriod = maxNumber(marineMorning.map((hour) => hour.swellPeriod || hour.wavePeriod));
+  const maxMorningSwellHeight = maxNumber(marineMorning.map((hour) => hour.swellHeight));
   const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
   const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
   const hasAdvisory = alerts.length > 0;
+  const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config });
+  const bestGoWindow = windows.find((window) => window.status === "go");
+  const bestMaybeWindow = windows.find((window) => window.status === "maybe");
+  const selectedWindow = bestGoWindow || bestMaybeWindow || windows[0] || null;
+  const cdfwAllowed = cdfwAllowsCrabbing(cdfwCrabStatus);
 
   let verdict = "NO GO THIS WEEKEND";
   let bestWindow = "No safe Sat/Sun window found";
   let returnBy = null;
 
-  const go = config.thresholds.go;
-  const maybe = config.thresholds.maybe;
-  const morningPassesMaybe = maxMorningWave !== null
-    && maxMorningWind !== null
-    && maxMorningSwellPeriod !== null
-    && maxMorningWave <= maybe.maxWaveFeet
-    && maxMorningWind <= maybe.maxWindMph
-    && maxMorningSwellPeriod <= maybe.maxSwellPeriodSeconds
-    && !hasAdvisory
-    && cdfwAllowsCrabbing(cdfwCrabStatus);
-  const morningPassesGo = morningPassesMaybe
-    && maxMorningWave <= go.maxWaveFeet
-    && maxMorningWind <= go.maxWindMph
-    && maxMorningSwellPeriod <= go.maxSwellPeriodSeconds;
-
-  if (morningPassesGo) {
-    verdict = "GO EARLY SATURDAY";
-    bestWindow = "Sat/Sun morning window looks within conservative thresholds";
+  if (bestGoWindow && !hasAdvisory && cdfwAllowed) {
+    verdict = `GO ${bestGoWindow.dayName.toUpperCase()} MORNING`;
+    bestWindow = `${bestGoWindow.dayName} 6-11am looks inside the updated 5 ft / 12 mph window`;
     returnBy = "Before late-morning wind builds";
-  } else if (morningPassesMaybe) {
-    verdict = "MAYBE SATURDAY";
-    bestWindow = "Early morning only, pending same-day recheck";
+  } else if (bestMaybeWindow && !hasAdvisory && cdfwAllowed) {
+    verdict = `MAYBE ${bestMaybeWindow.dayName.toUpperCase()} MORNING`;
+    bestWindow = `${bestMaybeWindow.dayName} 6-11am is marginal; recheck same-day`;
     returnBy = "Before late-morning wind builds";
   }
 
-  if (!cdfwAllowsCrabbing(cdfwCrabStatus)) {
+  if (!cdfwAllowed) {
     verdict = "NO GO THIS WEEKEND";
     bestWindow = "No Sat/Sun crab window selected";
     returnBy = null;
@@ -876,7 +867,8 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     alerts,
     maxMorningWave,
     maxMorningSwellPeriod,
-    maxMorningWind
+    maxMorningWind,
+    selectedWindow
   });
 
   return {
@@ -895,14 +887,17 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
       maxMorningWind,
       maxMorningWave,
       maxMorningSwellPeriod,
+      maxMorningSwellHeight,
       maxWeekendWave,
       maxWeekendWind,
+      morningWindows: windows,
+      selectedWindow,
       alerts,
       cdfwCrabStatus
     },
     risks: {
-      entryExit: maxMorningWave !== null && maxMorningWave <= 2 ? "Lower but exposed" : "High caution",
-      windDrift: maxMorningWind !== null && maxMorningWind <= 8 ? "Lower morning drift" : "Return risk",
+      entryExit: selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
+      windDrift: selectedWindow?.maxWind !== null && selectedWindow?.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
       current: "High caution",
       currentDetail: "China Beach sits inside the Golden Gate influence zone; paddle return current remains a standing caution for this launch.",
       confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded"
@@ -911,12 +906,76 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
       maxMorningWind,
       maxMorningWave,
       maxMorningSwellPeriod,
+      maxMorningSwellHeight,
       maxWeekendWave,
+      windows,
+      selectedWindow,
       alerts,
-      cdfwCrabStatus
+      cdfwCrabStatus,
+      thresholds: config.thresholds
     }),
     legalReminder: `CDFW check: ${cdfwCrabStatus.status}. Verify license, method, size, bag limit, gear marking, and same-day emergency updates before each trip.`
   };
+}
+
+function buildCrabbingMorningWindows({ weather, marine, config }) {
+  return [weekend.saturday, weekend.sunday]
+    .map((date) => {
+      const weatherHours = morningHoursForDate(weather, date);
+      const marineHours = morningHoursForDate(marine, date);
+      const maxWind = maxNumber(weatherHours.map((period) => parseWindMph(period.windSpeed)));
+      const maxWave = maxNumber(marineHours.map((hour) => hour.waveHeight));
+      const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
+      const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
+      const status = gradeCrabbingWindow({
+        maxWind,
+        maxWave,
+        maxSwellPeriod,
+        maxSwellHeight,
+        thresholds: config.thresholds
+      });
+
+      return {
+        date,
+        dayName: date.toLocaleDateString(undefined, { weekday: "long" }),
+        maxWind,
+        maxWave,
+        maxSwellPeriod,
+        maxSwellHeight,
+        status
+      };
+    })
+    .sort((a, b) => getCrabbingWindowRank(b.status) - getCrabbingWindowRank(a.status));
+}
+
+function morningHoursForDate(hours, date) {
+  return (hours || []).filter((hour) => {
+    const start = new Date(hour.startTime);
+    const localHour = start.getHours();
+    return start.toDateString() === date.toDateString() && localHour >= 6 && localHour <= 11;
+  });
+}
+
+function gradeCrabbingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
+  if (!Number.isFinite(maxWind) || !Number.isFinite(maxWave) || !Number.isFinite(maxSwellPeriod)) return "no-go";
+  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.go })) return "go";
+  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.maybe })) return "maybe";
+  return "no-go";
+}
+
+function passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
+  const pairedSwellBlock = Number.isFinite(maxSwellHeight)
+    && maxSwellHeight > thresholds.maxSwellHeightFeet
+    && maxSwellPeriod > thresholds.maxSwellPeriodSeconds;
+  return maxWave <= thresholds.maxWaveFeet
+    && maxWind <= thresholds.maxWindMph
+    && !pairedSwellBlock;
+}
+
+function getCrabbingWindowRank(status) {
+  if (status === "go") return 2;
+  if (status === "maybe") return 1;
+  return 0;
 }
 
 function cdfwAllowsCrabbing(cdfwCrabStatus) {
@@ -925,15 +984,19 @@ function cdfwAllowsCrabbing(cdfwCrabStatus) {
     && cdfwCrabStatus.status !== "Automatic CDFW check incomplete";
 }
 
-function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, maxMorningSwellPeriod, maxMorningWind }) {
+function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, maxMorningSwellPeriod, maxMorningWind, selectedWindow }) {
   if (!cdfwCrabStatus.inStatutorySeason) return "CDFW SEASON CLOSED";
   if (cdfwCrabStatus.status === "Possible health closure") return "POSSIBLE CDFW HEALTH CLOSURE";
   if (cdfwCrabStatus.status === "Automatic CDFW check incomplete") return "CDFW STATUS UNVERIFIED";
   if (cdfwCrabStatus.status === "Trap prohibition") return "CRAB TRAP PROHIBITION";
-  if (alerts.length) return "ACTIVE MARINE ALERT";
-  if (maxMorningWave !== null && maxMorningWave > 3) return "WAVES ABOVE THRESHOLD";
-  if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 12) return "LONG-PERIOD SWELL";
-  if (maxMorningWind !== null && maxMorningWind > 11) return "RETURN WIND RISK";
+  if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
+  if (selectedWindow?.maxWave !== null && selectedWindow?.maxWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
+  if (selectedWindow?.maxWind !== null && selectedWindow?.maxWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
+  if (selectedWindow?.maxSwellHeight > missionConfig.crabbing.thresholds.maybe.maxSwellHeightFeet
+    && selectedWindow?.maxSwellPeriod > missionConfig.crabbing.thresholds.maybe.maxSwellPeriodSeconds) return "LONG-PERIOD SWELL WITH SIZE";
+  if (maxMorningWave !== null && maxMorningWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
+  if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 16) return "LONG-PERIOD SWELL";
+  if (maxMorningWind !== null && maxMorningWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
   return "CONSERVATIVE THRESHOLDS NOT MET";
 }
 
@@ -947,7 +1010,7 @@ function summarizeAlerts(alerts) {
   return unique.length === 1 ? unique[0] : `${unique[0]} + ${unique.length - 1} more`;
 }
 
-function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellPeriod, maxWeekendWave, alerts, cdfwCrabStatus }) {
+function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellPeriod, maxMorningSwellHeight, maxWeekendWave, windows, selectedWindow, alerts, cdfwCrabStatus, thresholds }) {
   const reasons = [];
   reasons.push({
     type: cdfwCrabStatus.inStatutorySeason ? "good" : "bad",
@@ -964,16 +1027,32 @@ function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellP
   if (alerts.length) {
     reasons.push({ type: "bad", text: `NWS alert screen returned ${summarizeAlerts(alerts)} for the area.` });
   }
+  if (selectedWindow) {
+    reasons.push({
+      type: selectedWindow.status === "go" ? "good" : selectedWindow.status === "maybe" ? "warn" : "bad",
+      text: `Best individual morning is ${selectedWindow.dayName} 6-11am: waves ${formatNumber(selectedWindow.maxWave, " ft")}, wind ${formatNumber(selectedWindow.maxWind, " mph")}, swell ${formatNumber(selectedWindow.maxSwellHeight, " ft")} at ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}.`
+    });
+  }
+  if (windows?.length) {
+    reasons.push({
+      type: "warn",
+      text: `Saturday and Sunday are graded independently now; the app no longer lets one rough morning cancel the other. GO limit is ${formatNumber(thresholds.go.maxWaveFeet, " ft")} waves and ${formatNumber(thresholds.go.maxWindMph, " mph")} wind.`
+    });
+  }
   reasons.push({
-    type: maxMorningWave !== null && maxMorningWave <= 2 ? "good" : "bad",
-    text: `Open-Meteo marine forecast has Sat/Sun morning wave height at ${formatNumber(maxMorningWave, " ft")}.`
+    type: maxMorningWave !== null && maxMorningWave <= thresholds.maybe.maxWaveFeet ? "warn" : "bad",
+    text: `Whole-weekend morning max wave height is ${formatNumber(maxMorningWave, " ft")}; this is now context, not the sole decision gate.`
   });
   reasons.push({
-    type: maxMorningSwellPeriod !== null && maxMorningSwellPeriod <= 12 ? "warn" : "bad",
-    text: `Swell period reaches ${formatNumber(maxMorningSwellPeriod, " sec")}; long-period sets matter at an exposed beach launch.`
+    type: Number.isFinite(maxMorningSwellHeight)
+      && Number.isFinite(maxMorningSwellPeriod)
+      && (maxMorningSwellHeight <= thresholds.go.maxSwellHeightFeet || maxMorningSwellPeriod <= thresholds.go.maxSwellPeriodSeconds)
+      ? "warn"
+      : "bad",
+    text: `Swell reaches ${formatNumber(maxMorningSwellHeight, " ft")} at ${formatNumber(maxMorningSwellPeriod, " sec")}; long period is a hard blocker only when paired with larger swell height.`
   });
   reasons.push({
-    type: maxMorningWind !== null && maxMorningWind <= 11 ? "warn" : "bad",
+    type: maxMorningWind !== null && maxMorningWind <= thresholds.maybe.maxWindMph ? "warn" : "bad",
     text: `NWS hourly forecast puts Sat/Sun morning wind up to ${formatNumber(maxMorningWind, " mph")}; return drift matters near the Gate.`
   });
   reasons.push({
@@ -1005,6 +1084,7 @@ function evaluateSpearfishingCandidate(candidate) {
   if (!hasAdvisory && physicalScore >= 48 && candidate.legalStatus === "Known legal water assumed") verdict = "GO SATURDAY";
   const headlineReason = getSpearfishingHeadlineReason({
     hasAdvisory,
+    alerts: candidate.alerts,
     avgMorningWave,
     maxMorningSwellPeriod,
     maxMorningWind,
@@ -1035,13 +1115,14 @@ function evaluateSpearfishingCandidate(candidate) {
       surge: describeSurge(avgMorningWave, maxMorningSwellPeriod, candidate.exposure),
       visibility: inferVisibility(avgMorningWave, maxMorningSwellPeriod),
       legal: candidate.legalStatus,
-      confidence: hasAdvisory ? "Low: active marine alert" : "Medium condition confidence"
+      confidence: hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence"
     },
     reasons: buildSpearfishingReasons({
       avgMorningWave,
       maxMorningSwellPeriod,
       maxMorningWind,
       hasAdvisory,
+      alerts: candidate.alerts,
       exposure: candidate.exposure
     }),
     tags: [
@@ -1099,7 +1180,7 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
     bestWindowMatch,
     maxWindowWind,
     maxWindowWave,
-    hasAdvisory
+    alerts
   });
 
   return {
@@ -1178,8 +1259,8 @@ function getMarineNearTime(hours, time) {
   return (hours || []).filter((hour) => Math.abs(new Date(hour.startTime).getTime() - target) <= 2 * 60 * 60 * 1000);
 }
 
-function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, hasAdvisory }) {
-  if (hasAdvisory) return "ACTIVE MARINE ALERT";
+function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, alerts }) {
+  if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
   if (shellfishBlocked) return "CDPH SHELLFISH STATUS NOT VERIFIED";
   if (!rulesParsed) return "LEGAL/SITE CHECK INCOMPLETE";
   if (!bestWindowMatch) return "NO LOW TIDE EXPOSURE";
@@ -1261,8 +1342,8 @@ function getExposurePenalty(exposure) {
   return 3;
 }
 
-function getSpearfishingHeadlineReason({ hasAdvisory, avgMorningWave, maxMorningSwellPeriod, maxMorningWind, exposure }) {
-  if (hasAdvisory) return "ACTIVE MARINE ALERT";
+function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningSwellPeriod, maxMorningWind, exposure }) {
+  if (hasAdvisory) return summarizeAlerts(alerts).toUpperCase();
   if (avgMorningWave !== null && avgMorningWave > 3) return "HIGH ENTRY SURGE";
   if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 12) return "LONG-PERIOD SURGE";
   if (maxMorningWind !== null && maxMorningWind > 14) return "WIND CHOP";
@@ -1285,10 +1366,10 @@ function inferVisibility(waveHeight, swellPeriod) {
   return "Likely poor";
 }
 
-function buildSpearfishingReasons({ avgMorningWave, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, exposure }) {
+function buildSpearfishingReasons({ avgMorningWave, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, alerts, exposure }) {
   const reasons = [];
   if (hasAdvisory) {
-    reasons.push({ type: "bad", text: "Active NWS alert found near this candidate." });
+    reasons.push({ type: "bad", text: `NWS alert found near this candidate: ${summarizeAlerts(alerts)}.` });
   }
   reasons.push({
     type: avgMorningWave <= 2 ? "good" : avgMorningWave <= 3 ? "warn" : "bad",
