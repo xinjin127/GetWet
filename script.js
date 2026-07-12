@@ -224,7 +224,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v9";
+const CACHE_VERSION = "launch-window-v10";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -1083,6 +1083,17 @@ function evaluateSpearfishingCandidate(candidate) {
   const maxMorningWind = selectedWindow?.maxWind ?? maxNumber(weatherMorning.map((period) => parseWindMph(period.windSpeed)));
   const hasAdvisory = candidate.alerts.length > 0;
   const physicalScore = selectedWindow?.score ?? 0;
+  const physicalBlocker = getSpearfishingPhysicalBlocker({
+    selectedWindow,
+    thresholds,
+    exposure: candidate.exposure
+  });
+  const resolutionChecklist = buildSpearfishingResolutionChecklist({
+    selectedWindow,
+    thresholds,
+    candidate,
+    alerts: candidate.alerts
+  });
 
   let verdict = "NO GO THIS WEEKEND";
   if (!hasAdvisory && selectedWindow?.status === "maybe") verdict = `MAYBE ${selectedWindow.dayName.toUpperCase()} MORNING`;
@@ -1096,7 +1107,8 @@ function evaluateSpearfishingCandidate(candidate) {
     maxMorningSwellPeriod,
     maxMorningWind,
     exposure: candidate.exposure,
-    selectedWindow
+    selectedWindow,
+    physicalBlocker
   });
 
   return {
@@ -1125,7 +1137,9 @@ function evaluateSpearfishingCandidate(candidate) {
       surge: describeSurge(selectedWindow?.maxWave ?? avgMorningWave, maxMorningSwellPeriod, candidate.exposure),
       visibility: inferVisibility(avgMorningWave, maxMorningSwellPeriod),
       legal: candidate.legalStatus,
-      confidence: hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence"
+      confidence: hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence",
+      physical: physicalBlocker.label,
+      resolution: resolutionChecklist
     },
     reasons: buildSpearfishingReasons({
       avgMorningWave,
@@ -1156,7 +1170,9 @@ function evaluateSpearfishingCandidate(candidate) {
       maxMorningSwellPeriod,
       maxMorningWind,
       alerts: candidate.alerts
-    }
+    },
+    physicalBlocker,
+    resolutionChecklist
   };
 }
 
@@ -1233,6 +1249,70 @@ function scoreSpearfishingWindow({ status, candidate, avgWave, maxWave, maxSwell
   return statusBase + rankBonus - exposurePenalty - wavePenalty - windPenalty - longSwellPenalty;
 }
 
+function getSpearfishingPhysicalBlocker({ selectedWindow, thresholds, exposure }) {
+  if (!selectedWindow) {
+    return {
+      label: "NO FORECAST WINDOW",
+      detail: "The app did not receive enough weekend marine and wind data to grade a dive window."
+    };
+  }
+
+  const issues = [];
+  if (selectedWindow.maxWave > thresholds.go.maxWaveFeet) {
+    issues.push({
+      label: `WAVES ${formatNumber(selectedWindow.maxWave, " ft")} > ${formatNumber(thresholds.go.maxWaveFeet, " ft")} GO LIMIT`,
+      severity: selectedWindow.maxWave > thresholds.maybe.maxWaveFeet ? 3 : 2
+    });
+  }
+  if (selectedWindow.maxWind > thresholds.go.maxWindMph) {
+    issues.push({
+      label: `WIND ${formatNumber(selectedWindow.maxWind, " mph")} > ${formatNumber(thresholds.go.maxWindMph, " mph")} GO LIMIT`,
+      severity: selectedWindow.maxWind > thresholds.maybe.maxWindMph ? 3 : 2
+    });
+  }
+  if (selectedWindow.maxSwellHeight > thresholds.go.maxSwellHeightFeet
+    && selectedWindow.maxSwellPeriod > thresholds.go.maxSwellPeriodSeconds) {
+    issues.push({
+      label: `SWELL ${formatNumber(selectedWindow.maxSwellHeight, " ft")} AT ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}`,
+      severity: selectedWindow.maxSwellHeight > thresholds.maybe.maxSwellHeightFeet
+        && selectedWindow.maxSwellPeriod > thresholds.maybe.maxSwellPeriodSeconds ? 3 : 2
+    });
+  }
+  if (exposure === "open coast" && selectedWindow.status !== "go") {
+    issues.push({ label: "OPEN-COAST ENTRY EXPOSURE", severity: 1 });
+  }
+
+  if (!issues.length) {
+    return {
+      label: "PHYSICAL WINDOW EXISTS",
+      detail: `${selectedWindow.dayName} 6-11am clears waves, wind, and swell checks.`
+    };
+  }
+
+  issues.sort((a, b) => b.severity - a.severity);
+  return {
+    label: issues[0].label,
+    detail: `${selectedWindow.dayName} 6-11am is the best window found; ${issues.map((issue) => issue.label.toLowerCase()).join("; ")}.`
+  };
+}
+
+function buildSpearfishingResolutionChecklist({ selectedWindow, thresholds, candidate, alerts }) {
+  const items = [];
+  if (selectedWindow) {
+    items.push(`Target ${selectedWindow.dayName} 6-11am: need max waves <= ${formatNumber(thresholds.go.maxWaveFeet, " ft")} and wind <= ${formatNumber(thresholds.go.maxWindMph, " mph")}.`);
+    items.push(`Current best window: waves ${formatNumber(selectedWindow.maxWave, " ft")}, avg waves ${formatNumber(selectedWindow.avgWave, " ft")}, wind ${formatNumber(selectedWindow.maxWind, " mph")}, swell ${formatNumber(selectedWindow.maxSwellHeight, " ft")} at ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}.`);
+    items.push(`Long-period swell clears only if swell height is <= ${formatNumber(thresholds.go.maxSwellHeightFeet, " ft")} or period is <= ${formatNumber(thresholds.go.maxSwellPeriodSeconds, " sec")}.`);
+  } else {
+    items.push("Reload marine and NWS hourly data; no complete Sat/Sun morning window was available.");
+  }
+  if (alerts.length) {
+    items.push(`Resolve NWS alert before GO: ${summarizeAlerts(alerts)}.`);
+  }
+  items.push(`Confirm actual visibility and entry/exit at ${candidate.spot} day-of; model data does not include local visibility.`);
+  items.push("Confirm the exact legal fishing water before entering; this app assumes the chosen spot is legally preselected.");
+  return items;
+}
+
 function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus }) {
   const allWeather = weather.periods;
   const allMarine = marine;
@@ -1256,6 +1336,22 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
     && maxWindowWave !== null
     && maxWindowWind <= config.thresholds.maxWindMph
     && maxWindowWave <= config.thresholds.maxWaveFeet;
+  const physicalBlocker = getClammingPhysicalBlocker({
+    hasGoodTide,
+    bestWindowMatch,
+    maxWindowWind,
+    maxWindowWave,
+    thresholds: config.thresholds
+  });
+  const resolutionChecklist = buildClammingResolutionChecklist({
+    physicalBlocker,
+    bestWindowMatch,
+    maxWindowWind,
+    maxWindowWave,
+    clammingStatus,
+    alerts,
+    thresholds: config.thresholds
+  });
 
   let verdict = "NO GO THIS WEEKEND";
   if (hasGoodTide && calmEnough && !hasAdvisory && !shellfishBlocked && rulesParsed) {
@@ -1271,7 +1367,8 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
     bestWindowMatch,
     maxWindowWind,
     maxWindowWave,
-    alerts
+    alerts,
+    physicalBlocker
   });
 
   return {
@@ -1304,7 +1401,9 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
       tideAccess: hasGoodTide ? "Exposes mudflats" : "No daylight exposure",
       windMudflat: calmEnough ? "Calm enough window" : "Wind/surf can erase the window",
       shellfishHealth: clammingStatus.cdph.status,
-      confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded"
+      confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded",
+      physical: physicalBlocker.label,
+      resolution: resolutionChecklist
     },
     reasons: buildClammingReasons({
       clammingStatus,
@@ -1316,7 +1415,9 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
       maxWeekendWave,
       alerts
     }),
-    legalReminder: "Clamming check assumes the user has a valid California fishing license, legal access/parking, separate personal container, and will verify species-specific limits and same-day CDPH shellfish advisories before digging."
+    legalReminder: "Clamming check assumes the user has a valid California fishing license, legal access/parking, separate personal container, and will verify species-specific limits and same-day CDPH shellfish advisories before digging.",
+    physicalBlocker,
+    resolutionChecklist
   };
 }
 
@@ -1350,9 +1451,74 @@ function getMarineNearTime(hours, time) {
   return (hours || []).filter((hour) => Math.abs(new Date(hour.startTime).getTime() - target) <= 2 * 60 * 60 * 1000);
 }
 
-function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, alerts }) {
+function getClammingPhysicalBlocker({ hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, thresholds }) {
+  if (!bestWindowMatch) {
+    return {
+      label: "NO LOW TIDE EXPOSURE",
+      detail: `No hourly NOAA tide prediction reached ${formatNumber(thresholds.maxTideFeet, " ft")} or lower this weekend.`
+    };
+  }
+  if (!hasGoodTide) {
+    return {
+      label: "LOW TIDE OUTSIDE DAYLIGHT",
+      detail: `${formatTimeLabel(bestWindowMatch.time)} reaches ${formatNumber(bestWindowMatch.tideFeet, " ft")}, but the usable exposure is outside the daylight screen.`
+    };
+  }
+  if (maxWindowWave !== null && maxWindowWave > thresholds.maxWaveFeet) {
+    return {
+      label: `SURF ${formatNumber(maxWindowWave, " ft")} > ${formatNumber(thresholds.maxWaveFeet, " ft")} LIMIT`,
+      detail: `The selected low-tide window has nearby wave height around ${formatNumber(maxWindowWave, " ft")}.`
+    };
+  }
+  if (maxWindowWind !== null && maxWindowWind > thresholds.maxWindMph) {
+    return {
+      label: `WIND ${formatNumber(maxWindowWind, " mph")} > ${formatNumber(thresholds.maxWindMph, " mph")} LIMIT`,
+      detail: `The selected low-tide window has wind around ${formatNumber(maxWindowWind, " mph")}.`
+    };
+  }
+  if (maxWindowWave === null || maxWindowWind === null) {
+    return {
+      label: "PHYSICAL DATA INCOMPLETE",
+      detail: "The app found a tide window, but wind or surf data was missing near that time."
+    };
+  }
+  return {
+    label: "PHYSICAL WINDOW EXISTS",
+    detail: `${formatTimeLabel(bestWindowMatch.time)} reaches ${formatNumber(bestWindowMatch.tideFeet, " ft")} with wind ${formatNumber(maxWindowWind, " mph")} and surf ${formatNumber(maxWindowWave, " ft")}.`
+  };
+}
+
+function buildClammingResolutionChecklist({ physicalBlocker, bestWindowMatch, maxWindowWind, maxWindowWave, clammingStatus, alerts, thresholds }) {
+  const items = [];
+  if (bestWindowMatch) {
+    items.push(`Target ${formatTimeLabel(bestWindowMatch.time)}: tide ${formatNumber(bestWindowMatch.tideFeet, " ft")} at NOAA Point Reyes station ${sourceConfig.lawsonsTides.station}.`);
+    items.push(`Physical screen needs surf <= ${formatNumber(thresholds.maxWaveFeet, " ft")} and wind <= ${formatNumber(thresholds.maxWindMph, " mph")}; current selected window is surf ${formatNumber(maxWindowWave, " ft")} and wind ${formatNumber(maxWindowWind, " mph")}.`);
+  } else {
+    items.push(`Need a daylight tide <= ${formatNumber(thresholds.maxTideFeet, " ft")} at NOAA Point Reyes station ${sourceConfig.lawsonsTides.station}.`);
+  }
+  if (physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") {
+    items.push(`Physical blocker to clear: ${physicalBlocker.label}.`);
+  }
+  if (clammingStatus.cdph.status !== "No Marin advisory parsed") {
+    items.push(`Resolve shellfish health: open CDPH shellfish advisories and verify Marin/Tomales Bay is safe for sport-harvested clams. Current app result: ${clammingStatus.cdph.status}.`);
+  }
+  if (!["Clam rules parsed", "Clam rules baseline"].includes(clammingStatus.cdfw.status)) {
+    items.push(`Resolve CDFW clam rules: verify daylight hours, gear, species, size, and possession requirements. Current app result: ${clammingStatus.cdfw.status}.`);
+  }
+  if (!["Lawson guidance parsed", "Lawson guidance baseline"].includes(clammingStatus.lawsons.status)) {
+    items.push(`Resolve Lawson's Landing site guidance: verify access, parking, and the 0.5 ft tide exposure guidance. Current app result: ${clammingStatus.lawsons.status}.`);
+  }
+  if (alerts.length) {
+    items.push(`Resolve NWS alert before GO: ${summarizeAlerts(alerts)}.`);
+  }
+  items.push("Confirm access/parking and bring separate containers/license before digging.");
+  return items;
+}
+
+function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, alerts, physicalBlocker }) {
   if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
-  if (shellfishBlocked) return "CDPH SHELLFISH STATUS NOT VERIFIED";
+  if (physicalBlocker?.label && physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") return physicalBlocker.label;
+  if (shellfishBlocked) return "PHYSICAL WINDOW EXISTS; VERIFY CDPH";
   if (!rulesParsed) return "LEGAL/SITE CHECK INCOMPLETE";
   if (!bestWindowMatch) return "NO LOW TIDE EXPOSURE";
   if (!hasGoodTide) return "LOW TIDE OUTSIDE DAYLIGHT";
@@ -1433,15 +1599,16 @@ function getExposurePenalty(exposure) {
   return 3;
 }
 
-function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, exposure, selectedWindow }) {
+function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, exposure, selectedWindow, physicalBlocker }) {
   if (hasAdvisory) return summarizeAlerts(alerts).toUpperCase();
+  if (physicalBlocker?.label && physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") return physicalBlocker.label;
   if (selectedWindow?.status === "no-go" && maxMorningWave !== null && maxMorningWave > missionConfig.spearfishing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
   if (selectedWindow?.status === "no-go" && maxMorningWind !== null && maxMorningWind > missionConfig.spearfishing.thresholds.maybe.maxWindMph) return "WIND CHOP";
   if (maxMorningSwellHeight > missionConfig.spearfishing.thresholds.maybe.maxSwellHeightFeet
     && maxMorningSwellPeriod > missionConfig.spearfishing.thresholds.maybe.maxSwellPeriodSeconds) return "LONG-PERIOD SURGE WITH SIZE";
   if (avgMorningWave !== null && avgMorningWave > missionConfig.spearfishing.thresholds.maybe.maxWaveFeet) return "HIGH ENTRY SURGE";
   if (exposure === "open coast") return "OPEN-COAST EXPOSURE";
-  return "SAFETY THRESHOLDS NOT MET";
+  return "NO SPECIFIC PHYSICAL BLOCKER FOUND";
 }
 
 function describeSurge(waveHeight, swellPeriod, exposure) {
@@ -1914,6 +2081,16 @@ function renderClamming() {
       extraMetrics: [
         getWaterSourceMetric(sourceConfig.lawsonsTides),
         {
+          label: "Physical assessment",
+          value: data.physicalBlocker.label,
+          detail: data.physicalBlocker.detail
+        },
+        {
+          label: "Resolve checklist",
+          value: `${data.resolutionChecklist.length} checks`,
+          detail: formatChecklist(data.resolutionChecklist)
+        },
+        {
           label: "Low tide access",
           value: data.risks.tideAccess,
           detail: summary.daylightWindows.length
@@ -1952,6 +2129,16 @@ function getSpearfishingMetrics(item) {
   return [
     getWaterSourceMetric(sourceConfig.tides),
     {
+      label: "Physical assessment",
+      value: item.physicalBlocker.label,
+      detail: item.physicalBlocker.detail
+    },
+    {
+      label: "Resolve checklist",
+      value: `${item.resolutionChecklist.length} checks`,
+      detail: formatChecklist(item.resolutionChecklist)
+    },
+    {
       label: "Region / drive",
       value: `${item.region} · ${item.driveHours} hr from SF`,
       detail: `${formatAccessType(item.accessType)} access; best for ${item.suitability}.`
@@ -1979,6 +2166,10 @@ function getSpearfishingMetrics(item) {
         : "Physical-condition screen loaded independently; legal fishing water is treated as preselected for this spot."
     }
   ];
+}
+
+function formatChecklist(items = []) {
+  return items.map((item, index) => `${index + 1}. ${item}`).join(" ");
 }
 
 function renderMoreOptions(options) {
