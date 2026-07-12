@@ -39,6 +39,7 @@ const sourceConfig = {
     name: "CDFW regulations and California fishing checks",
     clamRegsUrl: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs",
     cdfwOceanSportfishMapUrl: "https://wildlife.ca.gov/OceanSportfishMap",
+    cdfwOceanSportfishExperienceUrl: "https://experience.arcgis.com/experience/ff600a0249fe42f6aba0a0c30cc52eed",
     cdfwMpaLayerUrl: "https://services2.arcgis.com/Uq9r85Potqm3MfRV/arcgis/rest/services/California_Marine_Protected_Areas/FeatureServer/1",
     cdphShellfishUrl: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx",
     cdphShellfishMapUrl: "https://experience.arcgis.com/experience/394836318cfe4f7494e1c09097a43559/",
@@ -235,7 +236,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v13";
+const CACHE_VERSION = "launch-window-v15";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -568,7 +569,10 @@ async function fetchSpearfishingLegalMap(candidate) {
       spatialRel: "esriSpatialRelIntersects",
       distance: "3",
       units: "esriSRUnit_StatuteMile",
-      outFields: "name,fullname,type,mpa_url,regulations_url,regulation_text"
+      outFields: "name,fullname,type,mpa_url,regulations_url,regulation_text",
+      returnGeometry: "true",
+      outSR: "4326",
+      geometryPrecision: "5"
     });
 
     return {
@@ -576,16 +580,26 @@ async function fetchSpearfishingLegalMap(candidate) {
       detail: features.length
         ? `${features.length} official CDFW MPA polygon(s) within 3 miles of this spot.`
         : "No official CDFW MPA polygon intersected the 3-mile screen around this spot.",
+      spot: {
+        latitude: candidate.coords.latitude,
+        longitude: candidate.coords.longitude
+      },
       mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
+      embedUrl: buildCdfwSportfishExperienceUrl(candidate.coords),
       layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
-      nearbyMpas: features.map((feature) => normalizeMpaFeature(feature.attributes || {})),
+      nearbyMpas: features.map((feature) => normalizeMpaFeature(feature.attributes || {}, feature.geometry)),
       sourceAvailable: true
     };
   } catch (error) {
     return {
       status: "CDFW MPA map unavailable",
       detail: "Official CDFW MPA map data could not be loaded automatically for this spot.",
+      spot: {
+        latitude: candidate.coords.latitude,
+        longitude: candidate.coords.longitude
+      },
       mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
+      embedUrl: buildCdfwSportfishExperienceUrl(candidate.coords),
       layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
       nearbyMpas: [],
       sourceAvailable: false
@@ -593,14 +607,15 @@ async function fetchSpearfishingLegalMap(candidate) {
   }
 }
 
-function normalizeMpaFeature(attributes) {
+function normalizeMpaFeature(attributes, geometry = null) {
   return {
     name: attributes.fullname || attributes.name || "Unnamed CDFW MPA",
     shortName: attributes.name || attributes.fullname || "CDFW MPA",
     type: attributes.type || "MPA",
     mpaUrl: attributes.mpa_url || "",
     regulationsUrl: attributes.regulations_url || "",
-    regulationText: normalizeText(attributes.regulation_text || "")
+    regulationText: normalizeText(attributes.regulation_text || ""),
+    geometry
   };
 }
 
@@ -610,6 +625,14 @@ function buildCdfwSportfishMapUrl(coords) {
     level: "13"
   });
   return `${sourceConfig.regulations.cdfwOceanSportfishMapUrl}?${params}`;
+}
+
+function buildCdfwSportfishExperienceUrl(coords) {
+  const params = new URLSearchParams({
+    center: `${coords.longitude},${coords.latitude}`,
+    level: "13"
+  });
+  return `${sourceConfig.regulations.cdfwOceanSportfishExperienceUrl}?${params}`;
 }
 
 async function fetchCdfwCrabStatus(config) {
@@ -2150,6 +2173,7 @@ function renderLegalMapPanel(legalMap) {
     <div class="legal-map-panel">
       <h3>Official legal maps / charts</h3>
       <p>${escapeHtml(legalMap.detail)}</p>
+      ${renderLegalBoundaryMap(legalMap)}
       <div class="legal-map-links">
         <a href="${escapeHtml(legalMap.mapUrl)}" target="_blank" rel="noreferrer">Open CDFW Ocean Sportfishing Map</a>
         <a href="${escapeHtml(legalMap.layerUrl)}" target="_blank" rel="noreferrer">Open CDFW MPA polygon layer</a>
@@ -2173,6 +2197,95 @@ function renderLegalMapPanel(legalMap) {
       ` : ""}
     </div>
   `;
+}
+
+function renderLegalBoundaryMap(legalMap) {
+  const polygons = (legalMap.nearbyMpas || [])
+    .map((mpa, index) => ({
+      ...mpa,
+      index,
+      rings: mpa.geometry?.rings || []
+    }))
+    .filter((mpa) => mpa.rings.length);
+  const spot = legalMap.spot;
+  if (!polygons.length || !spot) {
+    return `
+      <div class="legal-map-empty">
+        <strong>No local polygon preview available</strong>
+        <span>Open the official CDFW map for full chart detail.</span>
+      </div>
+    `;
+  }
+
+  const bounds = getMapBounds(polygons, spot);
+  const paths = polygons.map((mpa) => `
+    <g>
+      ${mpa.rings.map((ring) => `<polygon points="${ring.map((point) => projectMapPoint(point, bounds)).join(" ")}" class="${getMpaMapClass(mpa.type)}"></polygon>`).join("")}
+      ${renderMpaLabel(mpa, bounds)}
+    </g>
+  `).join("");
+  const spotPoint = projectMapPoint([spot.longitude, spot.latitude], bounds);
+
+  return `
+    <div class="legal-boundary-map" role="img" aria-label="CDFW MPA boundary map around this spearfishing spot">
+      <svg viewBox="0 0 320 210">
+        <rect x="0" y="0" width="320" height="210" class="map-water"></rect>
+        ${paths}
+        <circle cx="${spotPoint.split(",")[0]}" cy="${spotPoint.split(",")[1]}" r="4.8" class="map-spot"></circle>
+        <text x="${spotPoint.split(",")[0]}" y="${Math.max(14, Number(spotPoint.split(",")[1]) - 8).toFixed(1)}" class="map-spot-label">spot</text>
+      </svg>
+      <div class="map-legend">
+        <span><i class="legend-smca"></i>SMCA / limited take area</span>
+        <span><i class="legend-smr"></i>SMR / no-take reserve</span>
+        <span><i class="legend-spot"></i>Spot coordinate</span>
+      </div>
+    </div>
+  `;
+}
+
+function getMapBounds(polygons, spot) {
+  const points = [[spot.longitude, spot.latitude]];
+  polygons.forEach((mpa) => {
+    mpa.rings.forEach((ring) => {
+      ring.forEach((point) => points.push(point));
+    });
+  });
+  const lons = points.map((point) => Number(point[0])).filter(Number.isFinite);
+  const lats = points.map((point) => Number(point[1])).filter(Number.isFinite);
+  const minLon = Math.min(...lons);
+  const maxLon = Math.max(...lons);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const lonPad = Math.max(0.01, (maxLon - minLon) * 0.12);
+  const latPad = Math.max(0.01, (maxLat - minLat) * 0.12);
+  return {
+    minLon: minLon - lonPad,
+    maxLon: maxLon + lonPad,
+    minLat: minLat - latPad,
+    maxLat: maxLat + latPad
+  };
+}
+
+function projectMapPoint(point, bounds) {
+  const lon = Number(point[0]);
+  const lat = Number(point[1]);
+  const x = 16 + ((lon - bounds.minLon) / Math.max(0.0001, bounds.maxLon - bounds.minLon)) * 288;
+  const y = 194 - ((lat - bounds.minLat) / Math.max(0.0001, bounds.maxLat - bounds.minLat)) * 178;
+  return `${x.toFixed(1)},${y.toFixed(1)}`;
+}
+
+function renderMpaLabel(mpa, bounds) {
+  const firstRing = mpa.rings[0] || [];
+  if (!firstRing.length) return "";
+  const lon = averageNumber(firstRing.map((point) => Number(point[0])));
+  const lat = averageNumber(firstRing.map((point) => Number(point[1])));
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return "";
+  const [x, y] = projectMapPoint([lon, lat], bounds).split(",").map(Number);
+  return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" class="map-mpa-label">${escapeHtml(mpa.shortName)}</text>`;
+}
+
+function getMpaMapClass(type) {
+  return String(type || "").toUpperCase().includes("SMR") ? "map-mpa-smr" : "map-mpa-smca";
 }
 
 function truncateText(value, maxLength) {
