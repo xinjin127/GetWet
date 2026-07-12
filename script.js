@@ -222,6 +222,8 @@ const missionConfig = {
 const appState = {
   activeMode: "crabbing",
   showMoreSpearfishing: false,
+  weekendOffset: 0,
+  spearfishingIndex: 0,
   status: "loading",
   error: "",
   data: null,
@@ -234,12 +236,19 @@ const appState = {
   }
 };
 
-const weekend = getUpcomingWeekend();
-const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v15";
+const CACHE_VERSION = "launch-window-v17";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const MAX_WEEKEND_OFFSET = 4;
 
-function getUpcomingWeekend(baseDate = new Date()) {
+function getSelectedWeekend() {
+  return getUpcomingWeekend(new Date(), appState.weekendOffset);
+}
+
+function getSelectedWeekendRange() {
+  return formatWeekendRange(getSelectedWeekend());
+}
+
+function getUpcomingWeekend(baseDate = new Date(), offsetWeeks = 0) {
   const date = new Date(baseDate);
   const day = date.getDay();
   let daysUntilSaturday;
@@ -253,7 +262,7 @@ function getUpcomingWeekend(baseDate = new Date()) {
   }
 
   const saturday = new Date(date);
-  saturday.setDate(date.getDate() + daysUntilSaturday);
+  saturday.setDate(date.getDate() + daysUntilSaturday + (offsetWeeks * 7));
   saturday.setHours(0, 0, 0, 0);
 
   const sunday = new Date(saturday);
@@ -271,6 +280,13 @@ function formatWeekendRange({ saturday, sunday }) {
     ? `${weekdays[sunday.getDay()]} ${sunday.getDate()}`
     : `${weekdays[sunday.getDay()]} ${months[sunday.getMonth()]} ${sunday.getDate()}`;
   return `${satText} - ${sunText}`;
+}
+
+function getWeekendOptions() {
+  return Array.from({ length: MAX_WEEKEND_OFFSET + 1 }, (_, offset) => ({
+    offset,
+    label: formatWeekendRange(getUpcomingWeekend(new Date(), offset))
+  }));
 }
 
 function toApiDate(date) {
@@ -398,6 +414,7 @@ async function loadLiveData() {
     clamming: clammingDecision,
     spearfishing: {
       question: spearfishing.question,
+      options: spearfishingDecisions,
       topOption: spearfishingDecisions[0],
       moreOptions: spearfishingDecisions.slice(1)
     }
@@ -433,6 +450,7 @@ async function loadCachedOrFreshData({ forceRefresh = false } = {}) {
 }
 
 function getCacheKey() {
+  const weekend = getSelectedWeekend();
   return `${CACHE_VERSION}:${toIsoDate(weekend.saturday)}:${toIsoDate(weekend.sunday)}`;
 }
 
@@ -478,6 +496,7 @@ function formatCacheTime(value) {
 }
 
 async function fetchTides({ station }) {
+  const weekend = getSelectedWeekend();
   const params = new URLSearchParams({
     begin_date: toApiDate(weekend.saturday),
     end_date: toApiDate(weekend.sunday),
@@ -530,6 +549,7 @@ async function fetchNwsWeather(coords) {
 }
 
 async function fetchAlerts(coords) {
+  if (appState.weekendOffset > 0) return [];
   const params = new URLSearchParams({
     point: `${coords.latitude},${coords.longitude}`
   });
@@ -538,6 +558,7 @@ async function fetchAlerts(coords) {
 }
 
 async function fetchMarineForecast(coords) {
+  const weekend = getSelectedWeekend();
   const params = new URLSearchParams({
     latitude: coords.latitude,
     longitude: coords.longitude,
@@ -556,8 +577,12 @@ async function fetchMarineForecast(coords) {
     start_date: toIsoDate(weekend.saturday),
     end_date: toIsoDate(weekend.sunday)
   });
-  const data = await fetchJson(`${sourceConfig.marine.url}?${params}`);
-  return normalizeMarineHours(data.hourly || {});
+  try {
+    const data = await fetchJson(`${sourceConfig.marine.url}?${params}`);
+    return normalizeMarineHours(data.hourly || {});
+  } catch (error) {
+    return [];
+  }
 }
 
 async function fetchSpearfishingLegalMap(candidate) {
@@ -584,6 +609,7 @@ async function fetchSpearfishingLegalMap(candidate) {
         latitude: candidate.coords.latitude,
         longitude: candidate.coords.longitude
       },
+      staticMapUrl: `assets/maps/${candidate.id}.jpg`,
       mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
       embedUrl: buildCdfwSportfishExperienceUrl(candidate.coords),
       layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
@@ -598,6 +624,7 @@ async function fetchSpearfishingLegalMap(candidate) {
         latitude: candidate.coords.latitude,
         longitude: candidate.coords.longitude
       },
+      staticMapUrl: `assets/maps/${candidate.id}.jpg`,
       mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
       embedUrl: buildCdfwSportfishExperienceUrl(candidate.coords),
       layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
@@ -636,6 +663,7 @@ function buildCdfwSportfishExperienceUrl(coords) {
 }
 
 async function fetchCdfwCrabStatus(config) {
+  const weekend = getSelectedWeekend();
   const statutorySeason = getCdfwDungenessSeasonWindow(weekend.saturday, config.cdfwCountyGroup);
   const inStatutorySeason = isWeekendInsideRange(weekend, statutorySeason.start, statutorySeason.end);
   const [healthResult, whaleSafeResult] = await Promise.allSettled([
@@ -960,6 +988,7 @@ function filterWeekendHours(periods) {
 }
 
 function isWeekendDate(date) {
+  const weekend = getSelectedWeekend();
   return date.toDateString() === weekend.saturday.toDateString()
     || date.toDateString() === weekend.sunday.toDateString();
 }
@@ -1109,6 +1138,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
 }
 
 function buildCrabbingMorningWindows({ weather, marine, config }) {
+  const weekend = getSelectedWeekend();
   return [weekend.saturday, weekend.sunday]
     .map((date) => {
       const weatherHours = morningHoursForDate(weather, date);
@@ -1365,6 +1395,7 @@ function evaluateSpearfishingCandidate(candidate) {
 }
 
 function buildSpearfishingMorningWindows({ candidate, weather, marine, thresholds }) {
+  const weekend = getSelectedWeekend();
   return [weekend.saturday, weekend.sunday]
     .map((date) => {
       const weatherHours = morningHoursForDate(weather, date);
@@ -1446,6 +1477,12 @@ function getSpearfishingPhysicalBlocker({ selectedWindow, thresholds, exposure }
   }
 
   const issues = [];
+  if (!Number.isFinite(selectedWindow.maxWave) || !Number.isFinite(selectedWindow.maxWind) || !Number.isFinite(selectedWindow.maxSwellPeriod)) {
+    return {
+      label: "FORECAST DATA UNAVAILABLE",
+      detail: `${selectedWindow.dayName} 6-11am is outside at least one source forecast horizon, so the app cannot grade waves, wind, and swell for this beach.`
+    };
+  }
   if (selectedWindow.maxWave > thresholds.go.maxWaveFeet) {
     issues.push({
       label: `WAVES ${formatNumber(selectedWindow.maxWave, " ft")} > ${formatNumber(thresholds.go.maxWaveFeet, " ft")} GO LIMIT`,
@@ -1797,6 +1834,7 @@ function getExposurePenalty(exposure) {
 function getSpearfishingHeadlineReason({ hasAdvisory, alerts, avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, exposure, selectedWindow, physicalBlocker }) {
   if (hasAdvisory) return summarizeAlerts(alerts).toUpperCase();
   if (physicalBlocker?.label && physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") return physicalBlocker.label;
+  if (!Number.isFinite(maxMorningWave) || !Number.isFinite(maxMorningWind) || !Number.isFinite(maxMorningSwellPeriod)) return "FORECAST DATA UNAVAILABLE";
   if (selectedWindow?.status === "no-go" && maxMorningWave !== null && maxMorningWave > missionConfig.spearfishing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
   if (selectedWindow?.status === "no-go" && maxMorningWind !== null && maxMorningWind > missionConfig.spearfishing.thresholds.maybe.maxWindMph) return "WIND CHOP";
   if (maxMorningSwellHeight > missionConfig.spearfishing.thresholds.maybe.maxSwellHeightFeet
@@ -2087,6 +2125,7 @@ function renderCdfwCrabStatus(status) {
 }
 
 function renderTides(tideEvents, tideSource = sourceConfig.tides) {
+  const weekend = getSelectedWeekend();
   if (!tideEvents.length) return "";
   const hourlyEvents = tideEvents
     .map((event) => ({
@@ -2200,6 +2239,15 @@ function renderLegalMapPanel(legalMap) {
 }
 
 function renderLegalBoundaryMap(legalMap) {
+  if (legalMap.staticMapUrl) {
+    return `
+      <figure class="legal-static-map">
+        <img src="${escapeHtml(legalMap.staticMapUrl)}" width="1200" height="760" alt="Static geographic map with CDFW MPA polygons overlaid for this spearfishing spot">
+        <figcaption>Cached static basemap with CDFW MPA polygons overlaid. Open the official CDFW map below for interactive chart detail.</figcaption>
+      </figure>
+    `;
+  }
+
   const polygons = (legalMap.nearbyMpas || [])
     .map((mpa, index) => ({
       ...mpa,
@@ -2323,6 +2371,7 @@ function renderSourceList(sourceUrls = []) {
 function renderDecisionCard({ item, question, extraMetrics = [], legalReminder = "", tideEvents = [], tideSource = sourceConfig.tides }) {
   const headlineVerdict = item.headlineVerdict || item.verdict;
   const headlineReasonLabel = item.verdict.includes("NO GO") ? "Top blocker" : "Decision basis";
+  const weekendRange = getSelectedWeekendRange();
   const metrics = [
     {
       label: "Upcoming weekend",
@@ -2512,33 +2561,54 @@ function formatChecklist(items = []) {
   return items.map((item, index) => `${index + 1}. ${item}`).join(" ");
 }
 
-function renderMoreOptions(options) {
-  if (!appState.showMoreSpearfishing) return "";
+function getSpearfishingOptions() {
+  const spearfishing = appState.data?.spearfishing;
+  return spearfishing?.options || [
+    spearfishing?.topOption,
+    ...(spearfishing?.moreOptions || [])
+  ].filter(Boolean);
+}
 
+function clampSpearfishingIndex() {
+  const options = getSpearfishingOptions();
+  appState.spearfishingIndex = Math.max(0, Math.min(appState.spearfishingIndex, Math.max(0, options.length - 1)));
+}
+
+function setSpearfishingIndex(index) {
+  const options = getSpearfishingOptions();
+  if (!options.length) return;
+  appState.spearfishingIndex = (index + options.length) % options.length;
+  render();
+}
+
+function renderSpearfishingSelector(options, selectedIndex) {
+  if (!options.length) return "";
+  const item = options[selectedIndex];
   return `
-    <div class="more-options">
-      ${options.map((option) => renderDecisionCard({
-        item: option,
-        question: `Independent candidate check for ${option.region}, ${option.driveHours} hr from San Francisco.`,
-        extraMetrics: getSpearfishingMetrics(option)
-      })).join("")}
+    <div class="beach-selector" aria-label="Spearfishing beach selector">
+      <button class="beach-nav-button" type="button" data-spearfishing-nav="-1" aria-label="Previous ranked beach">‹</button>
+      <div class="beach-selector-current">
+        <span>Ranked ${selectedIndex + 1} of ${options.length} by likelihood</span>
+        <strong>${escapeHtml(item.spot)}</strong>
+        <p>${escapeHtml(item.verdict)} · ${escapeHtml(item.headlineReason)}</p>
+      </div>
+      <button class="beach-nav-button" type="button" data-spearfishing-nav="1" aria-label="Next ranked beach">›</button>
     </div>
   `;
 }
 
 function renderSpearfishing() {
   const data = appState.data.spearfishing;
-  const item = data.topOption;
+  const options = getSpearfishingOptions();
+  clampSpearfishingIndex();
+  const item = options[appState.spearfishingIndex] || data.topOption;
   return `
+    ${renderSpearfishingSelector(options, appState.spearfishingIndex)}
     ${renderDecisionCard({
       item,
       question: data.question,
       extraMetrics: getSpearfishingMetrics(item)
     })}
-    <button class="expand-button" type="button" data-expand-spearfishing>
-      ${appState.showMoreSpearfishing ? "Hide extra spearfishing options" : "Show more spearfishing options"}
-    </button>
-    ${renderMoreOptions(data.moreOptions)}
     ${renderSourceLinks()}
   `;
 }
@@ -2551,6 +2621,7 @@ function renderActiveMode() {
 }
 
 function renderLoading() {
+  const weekendRange = getSelectedWeekendRange();
   return `
     <article class="decision-card">
       <div class="card-top">
@@ -2570,6 +2641,7 @@ function renderLoading() {
 }
 
 function renderError() {
+  const weekendRange = getSelectedWeekendRange();
   return `
     <article class="decision-card">
       <div class="card-top">
@@ -2589,6 +2661,7 @@ function renderError() {
 
 function renderLockPreview() {
   const widget = document.querySelector("#lock-widget");
+  const weekendRange = getSelectedWeekendRange();
   let title = "Launch Window";
   let verdict = appState.status === "loading" ? "Checking sources" : "NO DATA - NO GO";
   let detail = `Upcoming weekend: ${weekendRange}`;
@@ -2598,7 +2671,7 @@ function renderLockPreview() {
       ? appState.data.crabbing
       : appState.activeMode === "clamming"
         ? appState.data.clamming
-        : appState.data.spearfishing.topOption;
+        : getSpearfishingOptions()[appState.spearfishingIndex] || appState.data.spearfishing.topOption;
     const modeLabel = appState.activeMode === "crabbing"
       ? "Crabbing"
       : appState.activeMode === "clamming"
@@ -2617,9 +2690,11 @@ function renderLockPreview() {
 }
 
 function render() {
+  const weekendRange = getSelectedWeekendRange();
   document.querySelectorAll("[data-weekend-range]").forEach((element) => {
     element.textContent = weekendRange;
   });
+  renderWeekendSelect();
   document.querySelector("[data-lock-weekend]").textContent = weekendRange;
 
   document.querySelectorAll(".mode-tab").forEach((tab) => {
@@ -2638,6 +2713,41 @@ function render() {
   renderLockPreview();
 }
 
+function renderWeekendSelect() {
+  const select = document.querySelector("[data-weekend-select]");
+  if (!select) return;
+  const currentValue = String(appState.weekendOffset);
+  const options = getWeekendOptions();
+  select.innerHTML = options.map((option) => `
+    <option value="${option.offset}" ${String(option.offset) === currentValue ? "selected" : ""}>
+      ${escapeHtml(option.offset === 0 ? `This weekend: ${option.label}` : `+${option.offset} week${option.offset === 1 ? "" : "s"}: ${option.label}`)}
+    </option>
+  `).join("");
+  select.value = currentValue;
+}
+
+function reloadSelectedWeekend({ forceRefresh = false } = {}) {
+  appState.status = "loading";
+  appState.error = "";
+  appState.data = null;
+  appState.spearfishingIndex = 0;
+  resetServerCacheStats();
+  render();
+  loadCachedOrFreshData({ forceRefresh })
+    .then(({ data, cache }) => {
+      appState.status = "ready";
+      appState.data = data;
+      appState.cache = cache;
+      clampSpearfishingIndex();
+      render();
+    })
+    .catch((error) => {
+      appState.status = "error";
+      appState.error = error.message;
+      render();
+    });
+}
+
 document.querySelector(".mode-tabs").addEventListener("click", (event) => {
   const button = event.target.closest("[data-mode]");
   if (!button) return;
@@ -2645,24 +2755,19 @@ document.querySelector(".mode-tabs").addEventListener("click", (event) => {
   render();
 });
 
+document.querySelector("[data-weekend-select]").addEventListener("change", (event) => {
+  appState.weekendOffset = Math.max(0, Math.min(MAX_WEEKEND_OFFSET, Number(event.target.value) || 0));
+  reloadSelectedWeekend();
+});
+
 document.querySelector("#mode-content").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-expand-spearfishing]");
-  if (!button) return;
-  appState.showMoreSpearfishing = !appState.showMoreSpearfishing;
-  render();
+  const navButton = event.target.closest("[data-spearfishing-nav]");
+  if (navButton) {
+    const direction = Number(navButton.dataset.spearfishingNav);
+    setSpearfishingIndex(appState.spearfishingIndex + direction);
+    return;
+  }
 });
 
 render();
-resetServerCacheStats();
-loadCachedOrFreshData()
-  .then(({ data, cache }) => {
-    appState.status = "ready";
-    appState.data = data;
-    appState.cache = cache;
-    render();
-  })
-  .catch((error) => {
-    appState.status = "error";
-    appState.error = error.message;
-    render();
-  });
+reloadSelectedWeekend();

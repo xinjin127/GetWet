@@ -87,7 +87,8 @@ h3 {
   font-size: 1rem;
 }
 
-.weekend-chip {
+.weekend-chip,
+.weekend-picker {
   width: fit-content;
   margin-bottom: 0;
   padding: 10px 12px;
@@ -98,8 +99,30 @@ h3 {
   font-size: 0.92rem;
 }
 
-.weekend-chip span {
+.weekend-chip span,
+.weekend-picker span {
   color: var(--text);
+  font-weight: 800;
+}
+
+.weekend-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.weekend-picker span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.weekend-picker select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(4, 15, 23, 0.72);
+  color: var(--text);
+  font: inherit;
   font-weight: 800;
 }
 
@@ -131,6 +154,51 @@ h3 {
 
 .mode-content {
   margin-top: 12px;
+}
+
+.beach-selector {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+  gap: 10px;
+  align-items: stretch;
+  margin-bottom: 12px;
+}
+
+.beach-nav-button {
+  min-height: 74px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(84, 199, 236, 0.11);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1.6rem;
+  font-weight: 900;
+}
+
+.beach-selector-current {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.beach-selector-current span,
+.beach-selector-current p {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.beach-selector-current strong {
+  display: block;
+  margin: 3px 0;
+  color: var(--text);
+  font-size: 1.05rem;
+}
+
+.beach-selector-current p {
+  margin-bottom: 0;
 }
 
 .decision-card,
@@ -785,6 +853,30 @@ h3 {
   font-size: 0.8rem;
   font-weight: 900;
   text-decoration: none;
+}
+
+.legal-static-map {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.legal-static-map img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1200 / 760;
+  object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(3, 12, 20, 0.62);
+}
+
+.legal-static-map figcaption {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  line-height: 1.35;
 }
 
 .legal-boundary-map {

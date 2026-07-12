@@ -14,7 +14,12 @@
             <p class="kicker">Ocean go / no-go</p>
             <h1>Launch Window</h1>
           </div>
-          <p class="weekend-chip">Upcoming weekend: <span data-weekend-range>Loading...</span></p>
+          <label class="weekend-picker">
+            <span>Preview weekend</span>
+            <select data-weekend-select aria-label="Preview weekend">
+              <option value="0">Loading...</option>
+            </select>
+          </label>
         </header>
 
         <nav class="mode-tabs" aria-label="Mission mode">
@@ -45,8 +50,8 @@
           </p>
           <ul>
             <li>Crabbing stays fixed to China Beach.</li>
-            <li>Spearfishing starts with one top option.</li>
-            <li>Extra candidates appear only when requested.</li>
+            <li>Spearfishing beaches are ranked and selectable.</li>
+            <li>Future weekends are previewable when source forecasts exist.</li>
           </ul>
         </section>
       </aside>
