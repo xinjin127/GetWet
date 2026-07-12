@@ -38,6 +38,8 @@ const sourceConfig = {
   regulations: {
     name: "CDFW regulations and California fishing checks",
     clamRegsUrl: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs",
+    cdfwOceanSportfishMapUrl: "https://wildlife.ca.gov/OceanSportfishMap",
+    cdfwMpaLayerUrl: "https://services2.arcgis.com/Uq9r85Potqm3MfRV/arcgis/rest/services/California_Marine_Protected_Areas/FeatureServer/1",
     cdphShellfishUrl: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx",
     cdphShellfishMapUrl: "https://experience.arcgis.com/experience/394836318cfe4f7494e1c09097a43559/",
     cdphShellfishLayers: {
@@ -48,6 +50,7 @@ const sourceConfig = {
     lawsonsClammingUrl: "https://www.lawsonslanding.com/clamming.html",
     links: [
       { label: "CDFW ocean sport fishing", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Fishing-Map" },
+      { label: "CDFW Ocean Sportfishing Map", url: "https://wildlife.ca.gov/OceanSportfishMap" },
       { label: "CDFW clam regulations", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs" },
       { label: "CDFW crab regulations", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs#crab" },
       { label: "CDFW Whale Safe Fisheries", url: "https://wildlife.ca.gov/Conservation/Marine/Whale-Safe-Fisheries" },
@@ -232,7 +235,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v12";
+const CACHE_VERSION = "launch-window-v13";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -361,7 +364,8 @@ async function loadLiveData() {
       ...candidate,
       weather: await fetchNwsWeather(candidate.coords),
       marine: await fetchMarineForecast(candidate.coords),
-      alerts: await fetchAlerts(candidate.coords)
+      alerts: await fetchAlerts(candidate.coords),
+      legalMap: await fetchSpearfishingLegalMap(candidate)
     })))
   ]);
 
@@ -553,6 +557,59 @@ async function fetchMarineForecast(coords) {
   });
   const data = await fetchJson(`${sourceConfig.marine.url}?${params}`);
   return normalizeMarineHours(data.hourly || {});
+}
+
+async function fetchSpearfishingLegalMap(candidate) {
+  try {
+    const features = await queryArcgisFeatures(sourceConfig.regulations.cdfwMpaLayerUrl, {
+      geometry: `${candidate.coords.longitude},${candidate.coords.latitude}`,
+      geometryType: "esriGeometryPoint",
+      inSR: "4326",
+      spatialRel: "esriSpatialRelIntersects",
+      distance: "3",
+      units: "esriSRUnit_StatuteMile",
+      outFields: "name,fullname,type,mpa_url,regulations_url,regulation_text"
+    });
+
+    return {
+      status: "CDFW MPA map loaded",
+      detail: features.length
+        ? `${features.length} official CDFW MPA polygon(s) within 3 miles of this spot.`
+        : "No official CDFW MPA polygon intersected the 3-mile screen around this spot.",
+      mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
+      layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
+      nearbyMpas: features.map((feature) => normalizeMpaFeature(feature.attributes || {})),
+      sourceAvailable: true
+    };
+  } catch (error) {
+    return {
+      status: "CDFW MPA map unavailable",
+      detail: "Official CDFW MPA map data could not be loaded automatically for this spot.",
+      mapUrl: buildCdfwSportfishMapUrl(candidate.coords),
+      layerUrl: sourceConfig.regulations.cdfwMpaLayerUrl,
+      nearbyMpas: [],
+      sourceAvailable: false
+    };
+  }
+}
+
+function normalizeMpaFeature(attributes) {
+  return {
+    name: attributes.fullname || attributes.name || "Unnamed CDFW MPA",
+    shortName: attributes.name || attributes.fullname || "CDFW MPA",
+    type: attributes.type || "MPA",
+    mpaUrl: attributes.mpa_url || "",
+    regulationsUrl: attributes.regulations_url || "",
+    regulationText: normalizeText(attributes.regulation_text || "")
+  };
+}
+
+function buildCdfwSportfishMapUrl(coords) {
+  const params = new URLSearchParams({
+    center: `${coords.longitude},${coords.latitude}`,
+    level: "13"
+  });
+  return `${sourceConfig.regulations.cdfwOceanSportfishMapUrl}?${params}`;
 }
 
 async function fetchCdfwCrabStatus(config) {
@@ -1226,6 +1283,7 @@ function evaluateSpearfishingCandidate(candidate) {
     driveHours: candidate.driveHours,
     accessType: candidate.accessType,
     mpaWarning: candidate.mpaWarning,
+    legalMap: candidate.legalMap,
     suitability: candidate.suitability,
     strengths: candidate.strengths,
     risksList: candidate.risks,
@@ -1275,7 +1333,8 @@ function evaluateSpearfishingCandidate(candidate) {
       maxMorningSwellHeight,
       maxMorningSwellPeriod,
       maxMorningWind,
-      alerts: candidate.alerts
+      alerts: candidate.alerts,
+      legalMap: candidate.legalMap
     },
     physicalBlocker,
     resolutionChecklist
@@ -2079,9 +2138,47 @@ function renderSpotDetails(item) {
       ${renderPillGroup("Strengths", item.strengths)}
       ${renderPillGroup("Target species to verify", item.species)}
       ${renderPillGroup("Condition risk badges", item.risksList)}
+      ${renderLegalMapPanel(item.legalMap)}
       ${renderSourceList(item.sourceUrls)}
     </section>
   `;
+}
+
+function renderLegalMapPanel(legalMap) {
+  if (!legalMap) return "";
+  return `
+    <div class="legal-map-panel">
+      <h3>Official legal maps / charts</h3>
+      <p>${escapeHtml(legalMap.detail)}</p>
+      <div class="legal-map-links">
+        <a href="${escapeHtml(legalMap.mapUrl)}" target="_blank" rel="noreferrer">Open CDFW Ocean Sportfishing Map</a>
+        <a href="${escapeHtml(legalMap.layerUrl)}" target="_blank" rel="noreferrer">Open CDFW MPA polygon layer</a>
+      </div>
+      ${legalMap.nearbyMpas?.length ? `
+        <div class="mpa-list">
+          ${legalMap.nearbyMpas.map((mpa) => `
+            <div class="mpa-item">
+              <div>
+                <strong>${escapeHtml(mpa.shortName)}</strong>
+                <span>${escapeHtml(mpa.type)} · ${escapeHtml(mpa.name)}</span>
+              </div>
+              ${mpa.regulationText ? `<p>${escapeHtml(truncateText(mpa.regulationText, 210))}</p>` : ""}
+              <div class="legal-map-links">
+                ${mpa.mpaUrl ? `<a href="${escapeHtml(mpa.mpaUrl)}" target="_blank" rel="noreferrer">CDFW MPA page</a>` : ""}
+                ${mpa.regulationsUrl ? `<a href="${escapeHtml(mpa.regulationsUrl)}" target="_blank" rel="noreferrer">Regulation text</a>` : ""}
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
 }
 
 function formatAccessType(accessType) {
