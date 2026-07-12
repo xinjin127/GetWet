@@ -238,6 +238,7 @@ const appState = {
 
 const CACHE_VERSION = "launch-window-v17";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
 
 function getSelectedWeekend() {
@@ -319,17 +320,29 @@ async function fetchText(url) {
 async function fetchViaCache(url, accept) {
   const shouldUseServerCache = ["localhost", "127.0.0.1"].includes(window.location.hostname);
   const requestUrl = shouldUseServerCache ? `/api/fetch?url=${encodeURIComponent(url)}` : url;
-  const response = await fetch(requestUrl, {
-    headers: { "Accept": accept }
-  });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(requestUrl, {
+      headers: { "Accept": accept },
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
 
-  const cacheHeader = response.headers.get("x-launch-cache");
-  if (cacheHeader) {
-    recordServerCacheHeader(cacheHeader);
+    const cacheHeader = response.headers.get("x-launch-cache");
+    if (cacheHeader) {
+      recordServerCacheHeader(cacheHeader);
+    }
+
+    return response.text();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`Timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s: ${url}`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-
-  return response.text();
 }
 
 function resetServerCacheStats() {
