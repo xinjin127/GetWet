@@ -14,6 +14,7 @@ const ALLOWED_HOSTS = new Set([
   "marine-api.open-meteo.com",
   "wildlife.ca.gov",
   "www.cdph.ca.gov",
+  "services2.arcgis.com",
   "www.lawsonslanding.com"
 ]);
 

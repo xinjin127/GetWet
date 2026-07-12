@@ -39,6 +39,12 @@ const sourceConfig = {
     name: "CDFW regulations and California fishing checks",
     clamRegsUrl: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Sport-Fishing/Invertebrate-Fishing-Regs",
     cdphShellfishUrl: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx",
+    cdphShellfishMapUrl: "https://experience.arcgis.com/experience/394836318cfe4f7494e1c09097a43559/",
+    cdphShellfishLayers: {
+      red: "https://services2.arcgis.com/wi1yEacfYjH5viqb/arcgis/rest/services/Health_Advisory_Symbols_(Red)/FeatureServer/0",
+      yellow: "https://services2.arcgis.com/wi1yEacfYjH5viqb/arcgis/rest/services/Limited_Advisory_Symbols_(Yellow)/FeatureServer/0",
+      specialAreas: "https://services2.arcgis.com/wi1yEacfYjH5viqb/arcgis/rest/services/All_Bivalve_Shellfish_Health_Advisory_Special_Advisory/FeatureServer/3"
+    },
     lawsonsClammingUrl: "https://www.lawsonslanding.com/clamming.html",
     links: [
       { label: "CDFW ocean sport fishing", url: "https://wildlife.ca.gov/Fishing/Ocean/Regulations/Fishing-Map" },
@@ -47,6 +53,7 @@ const sourceConfig = {
       { label: "CDFW Whale Safe Fisheries", url: "https://wildlife.ca.gov/Conservation/Marine/Whale-Safe-Fisheries" },
       { label: "CDFW crab health advisories", url: "https://wildlife.ca.gov/Fishing/Ocean/Health-Advisories" },
       { label: "CDPH shellfish advisories", url: "https://www.cdph.ca.gov/Programs/OPA/Pages/Shellfish-Advisories.aspx" },
+      { label: "CDPH shellfish advisory map", url: "https://experience.arcgis.com/experience/394836318cfe4f7494e1c09097a43559/" },
       { label: "Lawson's Landing clamming", url: "https://www.lawsonslanding.com/clamming.html" }
     ]
   }
@@ -197,6 +204,7 @@ const missionConfig = {
     spot: "Lawson's Landing",
     activity: "Tomales Bay clamming",
     coords: { latitude: 38.2314, longitude: -122.9682 },
+    cdphCounty: "Marin",
     tideStation: "9415020",
     question: "Is there a daylight low-tide clamming window at Lawson's Landing this upcoming Saturday or Sunday?",
     thresholds: {
@@ -224,7 +232,7 @@ const appState = {
 
 const weekend = getUpcomingWeekend();
 const weekendRange = formatWeekendRange(weekend);
-const CACHE_VERSION = "launch-window-v10";
+const CACHE_VERSION = "launch-window-v12";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 function getUpcomingWeekend(baseDate = new Date()) {
@@ -348,7 +356,7 @@ async function loadLiveData() {
     fetchNwsWeather(clamming.coords),
     fetchMarineForecast(clamming.coords),
     fetchAlerts(clamming.coords),
-    fetchClammingStatus(),
+    fetchClammingStatus(clamming),
     Promise.all(spearfishing.candidates.map(async (candidate) => ({
       ...candidate,
       weather: await fetchNwsWeather(candidate.coords),
@@ -481,10 +489,10 @@ async function fetchTides({ station }) {
   return data.predictions || [];
 }
 
-async function fetchClammingStatus() {
+async function fetchClammingStatus(config = missionConfig.clamming) {
   const [cdfwResult, cdphResult, lawsonsResult] = await Promise.allSettled([
     fetchText(sourceConfig.regulations.clamRegsUrl),
-    fetchText(sourceConfig.regulations.cdphShellfishUrl),
+    fetchCdphShellfishMapStatus(config),
     fetchText(sourceConfig.regulations.lawsonsClammingUrl)
   ]);
 
@@ -493,11 +501,12 @@ async function fetchClammingStatus() {
       ? parseCdfwClamRules(cdfwResult.value)
       : getCdfwClamRulesBaseline(),
     cdph: cdphResult.status === "fulfilled"
-      ? parseCdphShellfishAdvisory(cdphResult.value)
+      ? cdphResult.value
       : {
-        status: "Unverified",
-        detail: "CDPH shellfish advisory page could not be read automatically.",
-        sourceAvailable: false
+        status: "CDPH map unavailable",
+        detail: "CDPH ArcGIS shellfish advisory map could not be read automatically; call CDPH's Shellfish Information Line at (800) 553-4133 before digging.",
+        sourceAvailable: false,
+        checkedAt: new Date().toISOString()
       },
     lawsons: lawsonsResult.status === "fulfilled"
       ? parseLawsonsClammingGuidance(lawsonsResult.value)
@@ -684,6 +693,92 @@ function getCdfwClamRulesBaseline() {
   };
 }
 
+async function fetchCdphShellfishMapStatus(config) {
+  const county = config.cdphCounty || "Marin";
+  const { latitude, longitude } = config.coords;
+  const layers = sourceConfig.regulations.cdphShellfishLayers;
+  const [redResult, yellowResult, specialResult] = await Promise.allSettled([
+    queryArcgisFeatures(layers.red, {
+      where: `County_Name = '${county.replace(/'/g, "''")}'`,
+      outFields: "County_Name,Latitude,Longitude"
+    }),
+    queryArcgisFeatures(layers.yellow, {
+      where: `County_Name = '${county.replace(/'/g, "''")}'`,
+      outFields: "County_Name,Latitude,Longitude"
+    }),
+    queryArcgisFeatures(layers.specialAreas, {
+      geometry: `${longitude},${latitude}`,
+      geometryType: "esriGeometryPoint",
+      inSR: "4326",
+      spatialRel: "esriSpatialRelIntersects",
+      outFields: "TITLE,DESCRIPTION,DATE,TYPEID,VISIBLE"
+    })
+  ]);
+
+  const failures = [
+    redResult.status === "rejected" ? "red advisory symbols" : null,
+    yellowResult.status === "rejected" ? "yellow limited-advisory symbols" : null,
+    specialResult.status === "rejected" ? "special advisory polygons" : null
+  ].filter(Boolean);
+  const redFeatures = redResult.status === "fulfilled" ? redResult.value : [];
+  const yellowFeatures = yellowResult.status === "fulfilled" ? yellowResult.value : [];
+  const specialFeatures = specialResult.status === "fulfilled" ? specialResult.value : [];
+  const checkedAt = new Date().toISOString();
+  const activeDetails = [
+    redFeatures.length ? `${redFeatures.length} red CDPH advisory symbol(s) for ${county} County` : null,
+    yellowFeatures.length ? `${yellowFeatures.length} yellow CDPH limited-advisory symbol(s) for ${county} County` : null,
+    specialFeatures.length ? `${specialFeatures.length} CDPH special advisory polygon(s) intersect Lawson's Landing` : null
+  ].filter(Boolean);
+
+  if (activeDetails.length) {
+    return {
+      status: "Active CDPH advisory found",
+      detail: `CDPH advisory map found ${activeDetails.join("; ")}. Do not treat this as a clamming GO until CDPH clears the advisory.`,
+      sourceAvailable: true,
+      checkedAt,
+      redCount: redFeatures.length,
+      yellowCount: yellowFeatures.length,
+      specialAreaCount: specialFeatures.length,
+      failures
+    };
+  }
+
+  if (failures.length) {
+    return {
+      status: "CDPH map incomplete",
+      detail: `CDPH advisory map responded partially, but ${failures.join(", ")} could not be checked. Call CDPH's Shellfish Information Line at (800) 553-4133 before digging.`,
+      sourceAvailable: false,
+      checkedAt,
+      redCount: redFeatures.length,
+      yellowCount: yellowFeatures.length,
+      specialAreaCount: specialFeatures.length,
+      failures
+    };
+  }
+
+  return {
+    status: "No active Marin/Tomales advisory found",
+    detail: `CDPH advisory map returned no red Marin County advisory symbols, no yellow Marin County limited-advisory symbols, and no special advisory polygon intersecting Lawson's Landing. Checked ${formatShortDateTime(checkedAt)}.`,
+    sourceAvailable: true,
+    checkedAt,
+    redCount: 0,
+    yellowCount: 0,
+    specialAreaCount: 0,
+    failures: []
+  };
+}
+
+async function queryArcgisFeatures(layerUrl, params) {
+  const query = new URLSearchParams({
+    f: "json",
+    returnGeometry: "false",
+    ...params
+  });
+  const data = await fetchJson(`${layerUrl}/query?${query}`);
+  if (data.error) throw new Error(data.error.message || "ArcGIS query failed");
+  return data.features || [];
+}
+
 function parseCdphShellfishAdvisory(html) {
   const text = normalizeText(html);
   const marinIndex = text.search(/Marin County|Marin/i);
@@ -825,6 +920,17 @@ function formatNumber(value, suffix = "") {
 function formatTimeLabel(dateValue) {
   const date = new Date(dateValue);
   return date.toLocaleTimeString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+function formatShortDateTime(dateValue) {
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return "unknown time";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
 }
 
 function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus }) {
@@ -1313,6 +1419,10 @@ function buildSpearfishingResolutionChecklist({ selectedWindow, thresholds, cand
   return items;
 }
 
+function isCdphShellfishClear(cdphStatus) {
+  return cdphStatus?.status === "No active Marin/Tomales advisory found";
+}
+
 function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus }) {
   const allWeather = weather.periods;
   const allMarine = marine;
@@ -1326,9 +1436,7 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
   const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
   const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
   const hasAdvisory = alerts.length > 0;
-  const shellfishBlocked = clammingStatus.cdph.status === "Possible Marin shellfish advisory"
-    || clammingStatus.cdph.status === "Unverified"
-    || clammingStatus.cdph.status === "Shellfish status unparsed";
+  const shellfishBlocked = !isCdphShellfishClear(clammingStatus.cdph);
   const rulesParsed = ["Clam rules parsed", "Clam rules baseline"].includes(clammingStatus.cdfw.status)
     && ["Lawson guidance parsed", "Lawson guidance baseline"].includes(clammingStatus.lawsons.status);
   const hasGoodTide = Boolean(daylightWindows.length);
@@ -1368,7 +1476,8 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
     maxWindowWind,
     maxWindowWave,
     alerts,
-    physicalBlocker
+    physicalBlocker,
+    clammingStatus
   });
 
   return {
@@ -1499,8 +1608,8 @@ function buildClammingResolutionChecklist({ physicalBlocker, bestWindowMatch, ma
   if (physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") {
     items.push(`Physical blocker to clear: ${physicalBlocker.label}.`);
   }
-  if (clammingStatus.cdph.status !== "No Marin advisory parsed") {
-    items.push(`Resolve shellfish health: open CDPH shellfish advisories and verify Marin/Tomales Bay is safe for sport-harvested clams. Current app result: ${clammingStatus.cdph.status}.`);
+  if (!isCdphShellfishClear(clammingStatus.cdph)) {
+    items.push(`Resolve shellfish health: ${clammingStatus.cdph.detail}`);
   }
   if (!["Clam rules parsed", "Clam rules baseline"].includes(clammingStatus.cdfw.status)) {
     items.push(`Resolve CDFW clam rules: verify daylight hours, gear, species, size, and possession requirements. Current app result: ${clammingStatus.cdfw.status}.`);
@@ -1515,16 +1624,20 @@ function buildClammingResolutionChecklist({ physicalBlocker, bestWindowMatch, ma
   return items;
 }
 
-function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, alerts, physicalBlocker }) {
+function getClammingHeadlineReason({ shellfishBlocked, rulesParsed, hasGoodTide, bestWindowMatch, maxWindowWind, maxWindowWave, alerts, physicalBlocker, clammingStatus }) {
   if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
   if (physicalBlocker?.label && physicalBlocker.label !== "PHYSICAL WINDOW EXISTS") return physicalBlocker.label;
-  if (shellfishBlocked) return "PHYSICAL WINDOW EXISTS; VERIFY CDPH";
+  if (shellfishBlocked) {
+    return clammingStatus.cdph.status === "Active CDPH advisory found"
+      ? "CDPH ADVISORY FOUND"
+      : "CDPH MAP CHECK INCOMPLETE";
+  }
   if (!rulesParsed) return "LEGAL/SITE CHECK INCOMPLETE";
   if (!bestWindowMatch) return "NO LOW TIDE EXPOSURE";
   if (!hasGoodTide) return "LOW TIDE OUTSIDE DAYLIGHT";
   if (maxWindowWind !== null && maxWindowWind > missionConfig.clamming.thresholds.maxWindMph) return "WIND TOO HIGH";
   if (maxWindowWave !== null && maxWindowWave > missionConfig.clamming.thresholds.maxWaveFeet) return "SURF TOO HEAVY";
-  return "CONSERVATIVE THRESHOLDS NOT MET";
+  return "ALL CHECKS CLEAR";
 }
 
 function buildClammingReasons({ clammingStatus, lowTideWindows, daylightWindows, maxWindowWind, maxWindowWave, maxWeekendWind, maxWeekendWave, alerts }) {
@@ -1545,7 +1658,7 @@ function buildClammingReasons({ clammingStatus, lowTideWindows, daylightWindows,
     text: clammingStatus.cdfw.detail
   });
   reasons.push({
-    type: clammingStatus.cdph.status === "Possible Marin shellfish advisory" ? "bad" : clammingStatus.cdph.status === "Unverified" ? "warn" : "good",
+    type: clammingStatus.cdph.status === "Active CDPH advisory found" ? "bad" : isCdphShellfishClear(clammingStatus.cdph) ? "good" : "warn",
     text: clammingStatus.cdph.detail
   });
   if (alerts.length) {
@@ -1808,7 +1921,8 @@ function renderTideGraph(tideEvents) {
       </svg>
       <div class="graph-legend">
         <span><i class="legend-tide"></i>Hourly NOAA predictions</span>
-        <span><i class="legend-low"></i>Marked high/low when supplied</span>
+        <span><i class="legend-low"></i>Low tide</span>
+        <span><i class="legend-high"></i>High tide</span>
       </div>
     </article>
   `;
@@ -1918,19 +2032,34 @@ function renderTides(tideEvents, tideSource = sourceConfig.tides) {
 
 function renderHourlyTideDay(label, events) {
   if (!events.length) return "";
+  const minTide = minNumber(events.map((event) => event.value));
+  const maxTide = maxNumber(events.map((event) => event.value));
   return `
     <div class="hourly-tide-day">
       <h3>${escapeHtml(label)}</h3>
       <div class="hourly-tide-grid">
-        ${events.map((event) => `
-          <div class="hourly-tide-cell">
+        ${events.map((event) => {
+          const tideClass = getHourlyTideHighlightClass(event.value, minTide, maxTide);
+          return `
+          <div class="hourly-tide-cell ${tideClass}">
             <span>${escapeHtml(event.time.toLocaleTimeString(undefined, { hour: "numeric" }))}</span>
             <strong>${escapeHtml(event.value.toFixed(1))} ft</strong>
           </div>
-        `).join("")}
+        `;
+        }).join("")}
       </div>
     </div>
   `;
+}
+
+function getHourlyTideHighlightClass(value, minTide, maxTide) {
+  if (!Number.isFinite(value) || !Number.isFinite(minTide) || !Number.isFinite(maxTide)) return "";
+  const range = maxTide - minTide;
+  if (range <= 0) return "";
+  const band = Math.max(0.35, range * 0.16);
+  if (value <= minTide + band) return "tide-low-highlight";
+  if (value >= maxTide - band) return "tide-high-highlight";
+  return "";
 }
 
 function renderSpotDetails(item) {
@@ -1983,6 +2112,7 @@ function renderSourceList(sourceUrls = []) {
 
 function renderDecisionCard({ item, question, extraMetrics = [], legalReminder = "", tideEvents = [], tideSource = sourceConfig.tides }) {
   const headlineVerdict = item.headlineVerdict || item.verdict;
+  const headlineReasonLabel = item.verdict.includes("NO GO") ? "Top blocker" : "Decision basis";
   const metrics = [
     {
       label: "Upcoming weekend",
@@ -2014,7 +2144,7 @@ function renderDecisionCard({ item, question, extraMetrics = [], legalReminder =
         <h2 class="spot-title">${escapeHtml(item.spot)}</h2>
         <p>${escapeHtml(question)}</p>
         <span class="verdict-pill ${getVerdictClass(item.verdict)}">${escapeHtml(headlineVerdict)}</span>
-        ${item.headlineReason ? `<p class="headline-reason">Top blocker: ${escapeHtml(item.headlineReason)}</p>` : ""}
+        ${item.headlineReason ? `<p class="headline-reason">${headlineReasonLabel}: ${escapeHtml(item.headlineReason)}</p>` : ""}
       </div>
       ${renderMetrics(metrics)}
       ${renderConditionGraphs(item, tideEvents)}
