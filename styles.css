@@ -637,10 +637,12 @@ h3 {
   font-weight: 800;
 }
 
-#lock-time {
-  font-size: 3.3rem;
-  line-height: 1;
-  font-weight: 800;
+.lock-preview-label {
+  max-width: 170px;
+  color: var(--text);
+  font-size: 1.15rem;
+  line-height: 1.05;
+  font-weight: 900;
 }
 
 .lock-widget {
