@@ -88,7 +88,7 @@ h3 {
 }
 
 .weekend-chip,
-.weekend-picker {
+.weekend-stepper {
   width: fit-content;
   margin-bottom: 0;
   padding: 10px 12px;
@@ -99,31 +99,51 @@ h3 {
   font-size: 0.92rem;
 }
 
-.weekend-chip span,
-.weekend-picker span {
+.weekend-chip span {
   color: var(--text);
   font-weight: 800;
 }
 
-.weekend-picker {
+.weekend-stepper {
   display: grid;
-  gap: 6px;
+  grid-template-columns: 38px minmax(190px, 1fr) 38px;
+  gap: 8px;
+  align-items: stretch;
 }
 
-.weekend-picker span {
+.weekend-stepper-current {
+  display: grid;
+  gap: 3px;
+  align-content: center;
+}
+
+.weekend-stepper-current span {
   color: var(--muted);
   font-size: 0.72rem;
+  font-weight: 900;
   text-transform: uppercase;
 }
 
-.weekend-picker select {
-  min-height: 34px;
+.weekend-stepper-current strong {
+  color: var(--text);
+  font-size: 0.94rem;
+  line-height: 1.15;
+}
+
+.weekend-nav-button {
+  min-height: 40px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: rgba(4, 15, 23, 0.72);
+  background: rgba(84, 199, 236, 0.11);
   color: var(--text);
-  font: inherit;
-  font-weight: 800;
+  cursor: pointer;
+  font-size: 1.35rem;
+  font-weight: 900;
+}
+
+.weekend-nav-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
 }
 
 .mode-tabs {

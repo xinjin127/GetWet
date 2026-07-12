@@ -14,12 +14,14 @@
             <p class="kicker">Ocean go / no-go</p>
             <h1>Launch Window</h1>
           </div>
-          <label class="weekend-picker">
-            <span>Preview weekend</span>
-            <select data-weekend-select aria-label="Preview weekend">
-              <option value="0">Loading...</option>
-            </select>
-          </label>
+          <div class="weekend-stepper" aria-label="Preview weekend">
+            <button class="weekend-nav-button" type="button" data-weekend-nav="-1" aria-label="Previous preview weekend">‹</button>
+            <div class="weekend-stepper-current">
+              <span>Preview weekend</span>
+              <strong data-weekend-choice>Loading...</strong>
+            </div>
+            <button class="weekend-nav-button" type="button" data-weekend-nav="1" aria-label="Next preview weekend">›</button>
+          </div>
         </header>
 
         <nav class="mode-tabs" aria-label="Mission mode">

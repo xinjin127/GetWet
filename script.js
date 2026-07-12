@@ -2694,7 +2694,7 @@ function render() {
   document.querySelectorAll("[data-weekend-range]").forEach((element) => {
     element.textContent = weekendRange;
   });
-  renderWeekendSelect();
+  renderWeekendStepper();
   document.querySelector("[data-lock-weekend]").textContent = weekendRange;
 
   document.querySelectorAll(".mode-tab").forEach((tab) => {
@@ -2713,17 +2713,19 @@ function render() {
   renderLockPreview();
 }
 
-function renderWeekendSelect() {
-  const select = document.querySelector("[data-weekend-select]");
-  if (!select) return;
-  const currentValue = String(appState.weekendOffset);
-  const options = getWeekendOptions();
-  select.innerHTML = options.map((option) => `
-    <option value="${option.offset}" ${String(option.offset) === currentValue ? "selected" : ""}>
-      ${escapeHtml(option.offset === 0 ? `This weekend: ${option.label}` : `+${option.offset} week${option.offset === 1 ? "" : "s"}: ${option.label}`)}
-    </option>
-  `).join("");
-  select.value = currentValue;
+function renderWeekendStepper() {
+  const label = document.querySelector("[data-weekend-choice]");
+  if (!label) return;
+  const weekendLabel = getSelectedWeekendRange();
+  label.textContent = appState.weekendOffset === 0
+    ? `This weekend: ${weekendLabel}`
+    : `+${appState.weekendOffset} week${appState.weekendOffset === 1 ? "" : "s"}: ${weekendLabel}`;
+  document.querySelectorAll("[data-weekend-nav]").forEach((button) => {
+    const direction = Number(button.dataset.weekendNav);
+    button.disabled = direction < 0
+      ? appState.weekendOffset <= 0
+      : appState.weekendOffset >= MAX_WEEKEND_OFFSET;
+  });
 }
 
 function reloadSelectedWeekend({ forceRefresh = false } = {}) {
@@ -2755,8 +2757,10 @@ document.querySelector(".mode-tabs").addEventListener("click", (event) => {
   render();
 });
 
-document.querySelector("[data-weekend-select]").addEventListener("change", (event) => {
-  appState.weekendOffset = Math.max(0, Math.min(MAX_WEEKEND_OFFSET, Number(event.target.value) || 0));
+document.querySelector(".weekend-stepper").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-weekend-nav]");
+  if (!button || button.disabled) return;
+  appState.weekendOffset = Math.max(0, Math.min(MAX_WEEKEND_OFFSET, appState.weekendOffset + Number(button.dataset.weekendNav)));
   reloadSelectedWeekend();
 });
 

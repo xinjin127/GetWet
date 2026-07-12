@@ -119,7 +119,7 @@ def render_map(spot_id, label, lat, lon):
     features = get_mpas(lat, lon)
     width, height = 1200, 760
     bounds = collect_bounds(features, lat, lon)
-    zoom = choose_zoom(bounds, width, height)
+    zoom = min(15, choose_zoom(bounds, width, height) + 1)
     min_lon, min_lat, max_lon, max_lat = bounds
     wx1, wy1 = lonlat_to_world(min_lon, max_lat, zoom)
     wx2, wy2 = lonlat_to_world(max_lon, min_lat, zoom)
