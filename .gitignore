@@ -2,3 +2,7 @@
 .DS_Store
 node_modules/
 npm-debug.log*
+.next/
+out/
+public/script.js
+public/assets/

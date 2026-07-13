@@ -334,7 +334,8 @@ async function fetchText(url) {
 }
 
 async function fetchViaCache(url, accept) {
-  const shouldUseServerCache = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  const shouldUseServerCache = window.location.protocol !== "file:"
+    && window.location.hostname !== "xinjin127.github.io";
   const requestUrl = shouldUseServerCache ? `/api/fetch?url=${encodeURIComponent(url)}` : url;
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
