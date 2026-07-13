@@ -229,9 +229,20 @@ const appState = {
   showMoreSpearfishing: false,
   weekendOffset: 0,
   spearfishingIndex: 0,
+  loadGeneration: 0,
   status: "loading",
   error: "",
   data: null,
+  modeStatus: {
+    crabbing: "loading",
+    spearfishing: "loading",
+    clamming: "loading"
+  },
+  modeErrors: {
+    crabbing: "",
+    spearfishing: "",
+    clamming: ""
+  },
   cache: {
     status: "loading",
     detail: "Checking server cache",
@@ -241,7 +252,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v18";
+const CACHE_VERSION = "launch-window-v19";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -380,63 +391,75 @@ function summarizeServerCacheStats() {
 }
 
 async function loadLiveData() {
-  const crabbing = missionConfig.crabbing;
-  const spearfishing = missionConfig.spearfishing;
-  const clamming = missionConfig.clamming;
-
-  const [tides, clammingTides, crabbingWeather, crabbingMarine, crabbingAlerts, cdfwCrabStatus, clammingWeather, clammingMarine, clammingAlerts, clammingStatus, candidateResults] = await Promise.all([
-    fetchTides({ station: sourceConfig.tides.station }),
-    fetchTides({ station: clamming.tideStation }),
-    fetchNwsWeather(crabbing.coords),
-    fetchMarineForecast(crabbing.coords),
-    fetchAlerts(crabbing.coords),
-    fetchCdfwCrabStatus(crabbing),
-    fetchNwsWeather(clamming.coords),
-    fetchMarineForecast(clamming.coords),
-    fetchAlerts(clamming.coords),
-    fetchClammingStatus(clamming),
-    Promise.all(spearfishing.candidates.map(async (candidate) => ({
-      ...candidate,
-      weather: await fetchNwsWeather(candidate.coords),
-      marine: await fetchMarineForecast(candidate.coords),
-      alerts: await fetchAlerts(candidate.coords),
-      legalMap: await fetchSpearfishingLegalMap(candidate)
-    })))
+  const [crabbingDecision, spearfishingPayload, clammingDecision] = await Promise.all([
+    loadCrabbingData(),
+    loadSpearfishingData(),
+    loadClammingData()
   ]);
-
-  const crabbingDecision = evaluateCrabbing({
-    config: crabbing,
-    weather: crabbingWeather,
-    marine: crabbingMarine,
-    tides,
-    alerts: crabbingAlerts,
-    cdfwCrabStatus
-  });
-
-  const clammingDecision = evaluateClamming({
-    config: clamming,
-    weather: clammingWeather,
-    marine: clammingMarine,
-    tides: clammingTides,
-    alerts: clammingAlerts,
-    clammingStatus
-  });
-
-  const spearfishingDecisions = candidateResults
-    .map((candidate) => evaluateSpearfishingCandidate(candidate))
-    .sort((a, b) => b.score - a.score);
-
   return {
     generatedAt: new Date(),
     crabbing: crabbingDecision,
     clamming: clammingDecision,
-    spearfishing: {
-      question: spearfishing.question,
-      options: spearfishingDecisions,
-      topOption: spearfishingDecisions[0],
-      moreOptions: spearfishingDecisions.slice(1)
-    }
+    spearfishing: spearfishingPayload
   };
+}
+
+async function loadCrabbingData() {
+  const crabbing = missionConfig.crabbing;
+  const [tides, weather, marine, alerts, cdfwCrabStatus] = await Promise.all([
+    fetchTides({ station: sourceConfig.tides.station }),
+    fetchNwsWeather(crabbing.coords),
+    fetchMarineForecast(crabbing.coords),
+    fetchAlerts(crabbing.coords),
+    fetchCdfwCrabStatus(crabbing)
+  ]);
+  return evaluateCrabbing({
+    config: crabbing,
+    weather,
+    marine,
+    tides,
+    alerts,
+    cdfwCrabStatus
+  });
+}
+
+async function loadSpearfishingData() {
+  const spearfishing = missionConfig.spearfishing;
+  const candidateResults = await Promise.all(spearfishing.candidates.map(async (candidate) => ({
+    ...candidate,
+    weather: await fetchNwsWeather(candidate.coords),
+    marine: await fetchMarineForecast(candidate.coords),
+    alerts: await fetchAlerts(candidate.coords),
+    legalMap: await fetchSpearfishingLegalMap(candidate)
+  })));
+  const spearfishingDecisions = candidateResults
+    .map((candidate) => evaluateSpearfishingCandidate(candidate))
+    .sort((a, b) => b.score - a.score);
+  return {
+    question: spearfishing.question,
+    options: spearfishingDecisions,
+    topOption: spearfishingDecisions[0],
+    moreOptions: spearfishingDecisions.slice(1)
+  };
+}
+
+async function loadClammingData() {
+  const clamming = missionConfig.clamming;
+  const [tides, weather, marine, alerts, clammingStatus] = await Promise.all([
+    fetchTides({ station: clamming.tideStation }),
+    fetchNwsWeather(clamming.coords),
+    fetchMarineForecast(clamming.coords),
+    fetchAlerts(clamming.coords),
+    fetchClammingStatus(clamming)
+  ]);
+  return evaluateClamming({
+    config: clamming,
+    weather,
+    marine,
+    tides,
+    alerts,
+    clammingStatus
+  });
 }
 
 async function loadCachedOrFreshData({ forceRefresh = false } = {}) {
@@ -464,6 +487,41 @@ async function loadCachedOrFreshData({ forceRefresh = false } = {}) {
       status: "fresh",
       detail: `Browser cache refreshed at ${formatCacheTime(new Date().toISOString())}${serverDetail}`
     }
+  };
+}
+
+function getCachedWeekendData({ forceRefresh = false } = {}) {
+  if (forceRefresh) return null;
+  const cached = readCachedData(getCacheKey());
+  if (!cached) return null;
+  return {
+    data: reviveCachedData(cached.data),
+    cache: {
+      status: "browser-cached",
+      detail: `Browser cache reused weekend checks from ${formatCacheTime(cached.savedAt)}`
+    }
+  };
+}
+
+function makeEmptyWeekendData() {
+  return {
+    generatedAt: new Date(),
+    crabbing: null,
+    spearfishing: null,
+    clamming: null
+  };
+}
+
+function resetModeStatuses(status = "loading") {
+  appState.modeStatus = {
+    crabbing: status,
+    spearfishing: status,
+    clamming: status
+  };
+  appState.modeErrors = {
+    crabbing: "",
+    spearfishing: "",
+    clamming: ""
   };
 }
 
@@ -2681,10 +2739,51 @@ function renderSpearfishing() {
 }
 
 function renderActiveMode() {
+  if (!appState.data?.[appState.activeMode]) return renderModeLoading(appState.activeMode);
   if (appState.activeMode === "crabbing") return renderCrabbing();
   if (appState.activeMode === "spearfishing") return renderSpearfishing();
   if (appState.activeMode === "clamming") return renderClamming();
   return renderCrabbing();
+}
+
+function renderModeLoading(mode) {
+  const labels = {
+    crabbing: "Crabbing",
+    spearfishing: "Spearfishing",
+    clamming: "Clamming"
+  };
+  const status = appState.modeStatus[mode] || "loading";
+  const error = appState.modeErrors[mode];
+  const queueDetail = mode === "crabbing"
+    ? "Loading the default crabbing card first."
+    : `${labels.crabbing} loads first; ${labels[mode]} is queued behind it.`;
+  if (status === "error") {
+    return `
+      <article class="decision-card">
+        <div class="card-top">
+          <div class="meta-row"><span>${escapeHtml(labels[mode])}</span><span>${escapeHtml(getSelectedWeekendRange())}</span></div>
+          <h2 class="spot-title">${escapeHtml(labels[mode])} data unavailable</h2>
+          <p>${escapeHtml(error || "This activity could not finish its live source checks.")}</p>
+          <span class="verdict-pill verdict-no-go">NO DATA - NO GO</span>
+        </div>
+        ${renderSourceLinks()}
+      </article>
+    `;
+  }
+  return `
+    <article class="decision-card">
+      <div class="card-top">
+        <div class="meta-row"><span>${escapeHtml(labels[mode])}</span><span>${escapeHtml(getSelectedWeekendRange())}</span></div>
+        <h2 class="spot-title">Loading ${escapeHtml(labels[mode])}</h2>
+        <p>${escapeHtml(queueDetail)}</p>
+        <span class="verdict-pill verdict-maybe">CHECKING LIVE SOURCES</span>
+      </div>
+      ${renderMetrics([
+        { label: "Queue", value: mode === "crabbing" ? "First" : "Pending" },
+        { label: "Cache", value: appState.cache.detail || "Checking source cache" }
+      ])}
+    </article>
+  `;
 }
 
 function renderLoading() {
@@ -2733,7 +2832,7 @@ function renderLockPreview() {
   let verdict = appState.status === "loading" ? "Checking sources" : "NO DATA - NO GO";
   let detail = `Upcoming weekend: ${weekendRange}`;
 
-  if (appState.status === "ready") {
+  if ((appState.status === "ready" || appState.status === "partial") && appState.data?.[appState.activeMode]) {
     const item = appState.activeMode === "crabbing"
       ? appState.data.crabbing
       : appState.activeMode === "clamming"
@@ -2796,25 +2895,94 @@ function renderWeekendStepper() {
 }
 
 function reloadSelectedWeekend({ forceRefresh = false } = {}) {
+  const generation = appState.loadGeneration + 1;
+  appState.loadGeneration = generation;
   appState.status = "loading";
   appState.error = "";
   appState.data = null;
   appState.spearfishingIndex = 0;
+  resetModeStatuses("loading");
   resetServerCacheStats();
   render();
-  loadCachedOrFreshData({ forceRefresh })
-    .then(({ data, cache }) => {
-      appState.status = "ready";
-      appState.data = data;
-      appState.cache = cache;
-      clampSpearfishingIndex();
-      render();
-    })
-    .catch((error) => {
-      appState.status = "error";
-      appState.error = error.message;
-      render();
-    });
+
+  const cached = getCachedWeekendData({ forceRefresh });
+  if (cached) {
+    appState.status = "ready";
+    appState.data = cached.data;
+    appState.cache = cached.cache;
+    resetModeStatuses("ready");
+    clampSpearfishingIndex();
+    render();
+    return;
+  }
+
+  appState.status = "partial";
+  appState.data = makeEmptyWeekendData();
+  appState.cache = {
+    ...appState.cache,
+    detail: "Loading crabbing first; other activities are queued"
+  };
+  render();
+
+  loadWeekendProgressively(generation);
+}
+
+async function loadWeekendProgressively(generation) {
+  const setActivityData = (mode, data) => {
+    if (generation !== appState.loadGeneration) return false;
+    appState.data[mode] = data;
+    appState.modeStatus[mode] = "ready";
+    appState.modeErrors[mode] = "";
+    if (mode === "spearfishing") clampSpearfishingIndex();
+    render();
+    return true;
+  };
+
+  const setActivityError = (mode, error) => {
+    if (generation !== appState.loadGeneration) return false;
+    appState.modeStatus[mode] = "error";
+    appState.modeErrors[mode] = error.message;
+    render();
+    return true;
+  };
+
+  try {
+    const crabbingData = await loadCrabbingData();
+    if (!setActivityData("crabbing", crabbingData)) return;
+    appState.cache.detail = "Crabbing ready; loading spearfishing next";
+    render();
+  } catch (error) {
+    setActivityError("crabbing", error);
+  }
+
+  try {
+    const spearfishingData = await loadSpearfishingData();
+    if (!setActivityData("spearfishing", spearfishingData)) return;
+    appState.cache.detail = "Spearfishing ready; loading clamming next";
+    render();
+  } catch (error) {
+    setActivityError("spearfishing", error);
+  }
+
+  try {
+    const clammingData = await loadClammingData();
+    if (!setActivityData("clamming", clammingData)) return;
+  } catch (error) {
+    setActivityError("clamming", error);
+  }
+
+  if (generation !== appState.loadGeneration) return;
+  summarizeServerCacheStats();
+  const hasErrors = Object.values(appState.modeStatus).some((status) => status === "error");
+  appState.status = hasErrors ? "partial" : "ready";
+  appState.cache = {
+    status: hasErrors ? "partial" : "fresh",
+    detail: hasErrors
+      ? `Some checks failed; ${appState.cache.detail}`
+      : `Browser cache refreshed at ${formatCacheTime(new Date().toISOString())}; ${appState.cache.detail.toLowerCase()}`
+  };
+  if (!hasErrors) writeCachedData(getCacheKey(), appState.data);
+  render();
 }
 
 document.querySelector(".mode-tabs").addEventListener("click", (event) => {
