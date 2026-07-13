@@ -21,6 +21,11 @@ const sourceConfig = {
     url: "https://marine-api.open-meteo.com/v1/marine",
     link: "https://open-meteo.com/en/docs/marine-weather-api"
   },
+  weather: {
+    name: "Open-Meteo hourly wind fallback",
+    url: "https://api.open-meteo.com/v1/forecast",
+    link: "https://open-meteo.com/en/docs"
+  },
   ndbc: {
     name: "NDBC Buoy 46237 San Francisco Bar",
     station: "46237",
@@ -236,7 +241,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v17";
+const CACHE_VERSION = "launch-window-v18";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -552,13 +557,49 @@ async function fetchClammingStatus(config = missionConfig.clamming) {
 }
 
 async function fetchNwsWeather(coords) {
-  const point = await fetchJson(`${sourceConfig.nws.pointsUrl}/${coords.latitude},${coords.longitude}`);
-  const hourlyUrl = point.properties.forecastHourly;
-  const hourly = await fetchJson(hourlyUrl);
-  return {
-    sourceUrl: hourlyUrl,
-    periods: filterWeekendHours(hourly.properties.periods || [])
-  };
+  try {
+    const point = await fetchJson(`${sourceConfig.nws.pointsUrl}/${coords.latitude},${coords.longitude}`);
+    const hourlyUrl = point.properties.forecastHourly;
+    const hourly = await fetchJson(hourlyUrl);
+    const periods = filterWeekendHours(hourly.properties.periods || []);
+    if (periods.length) {
+      return {
+        sourceUrl: hourlyUrl,
+        sourceName: sourceConfig.nws.name,
+        periods
+      };
+    }
+  } catch {
+    // Fall through to Open-Meteo when NWS is outside horizon or unavailable.
+  }
+  return fetchOpenMeteoWind(coords);
+}
+
+async function fetchOpenMeteoWind(coords) {
+  const weekend = getSelectedWeekend();
+  const params = new URLSearchParams({
+    latitude: coords.latitude,
+    longitude: coords.longitude,
+    hourly: ["wind_speed_10m", "wind_direction_10m"].join(","),
+    wind_speed_unit: "mph",
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
+    start_date: toIsoDate(weekend.saturday),
+    end_date: toIsoDate(weekend.sunday)
+  });
+  try {
+    const data = await fetchJson(`${sourceConfig.weather.url}?${params}`);
+    return {
+      sourceUrl: `${sourceConfig.weather.url}?${params}`,
+      sourceName: sourceConfig.weather.name,
+      periods: normalizeOpenMeteoWindHours(data.hourly || {})
+    };
+  } catch {
+    return {
+      sourceUrl: `${sourceConfig.weather.url}?${params}`,
+      sourceName: `${sourceConfig.weather.name} unavailable`,
+      periods: []
+    };
+  }
 }
 
 async function fetchAlerts(coords) {
@@ -993,6 +1034,14 @@ function normalizeMarineHours(hourly) {
   }));
 }
 
+function normalizeOpenMeteoWindHours(hourly) {
+  return (hourly.time || []).map((time, index) => ({
+    startTime: time,
+    windSpeed: Number(hourly.wind_speed_10m?.[index]),
+    windDirection: Number(hourly.wind_direction_10m?.[index])
+  }));
+}
+
 function filterWeekendHours(periods) {
   return periods.filter((period) => {
     const start = new Date(period.startTime);
@@ -1015,7 +1064,8 @@ function morningHours(hours) {
 }
 
 function parseWindMph(value) {
-  const numbers = String(value || "").match(/\d+/g);
+  if (Number.isFinite(value)) return value;
+  const numbers = String(value || "").match(/\d+(?:\.\d+)?/g);
   if (!numbers) return null;
   return Math.max(...numbers.map(Number));
 }
@@ -1125,6 +1175,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
       morningWindows: windows,
       selectedWindow,
       alerts,
+      windSource: weather.sourceName,
       cdfwCrabStatus
     },
     risks: {
@@ -1286,7 +1337,7 @@ function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellP
   });
   reasons.push({
     type: maxMorningWind !== null && maxMorningWind <= thresholds.maybe.maxWindMph ? "warn" : "bad",
-    text: `NWS hourly forecast puts Sat/Sun morning wind up to ${formatNumber(maxMorningWind, " mph")}; return drift matters near the Gate.`
+    text: `Hourly wind forecast puts Sat/Sun morning wind up to ${formatNumber(maxMorningWind, " mph")}; return drift matters near the Gate.`
   });
   reasons.push({
     type: "warn",
@@ -1381,7 +1432,8 @@ function evaluateSpearfishingCandidate(candidate) {
       alerts: candidate.alerts,
       exposure: candidate.exposure,
       selectedWindow,
-      thresholds
+      thresholds,
+      windSource: candidate.weather.sourceName
     }),
     tags: [
       candidate.region,
@@ -1400,6 +1452,7 @@ function evaluateSpearfishingCandidate(candidate) {
       maxMorningSwellPeriod,
       maxMorningWind,
       alerts: candidate.alerts,
+      windSource: candidate.weather.sourceName,
       legalMap: candidate.legalMap
     },
     physicalBlocker,
@@ -1636,6 +1689,7 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
       maxWeekendWind,
       maxWeekendWave,
       alerts,
+      windSource: weather.sourceName,
       clammingStatus
     },
     risks: {
@@ -1872,7 +1926,7 @@ function inferVisibility(waveHeight, swellPeriod) {
   return "Likely poor";
 }
 
-function buildSpearfishingReasons({ avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, alerts, exposure, selectedWindow, thresholds }) {
+function buildSpearfishingReasons({ avgMorningWave, maxMorningWave, maxMorningSwellHeight, maxMorningSwellPeriod, maxMorningWind, hasAdvisory, alerts, exposure, selectedWindow, thresholds, windSource }) {
   const reasons = [];
   if (hasAdvisory) {
     reasons.push({ type: "bad", text: `NWS alert found near this candidate: ${summarizeAlerts(alerts)}.` });
@@ -1897,7 +1951,7 @@ function buildSpearfishingReasons({ avgMorningWave, maxMorningWave, maxMorningSw
   });
   reasons.push({
     type: maxMorningWind <= thresholds.go.maxWindMph ? "good" : maxMorningWind <= thresholds.maybe.maxWindMph ? "warn" : "bad",
-    text: `NWS morning wind reaches ${formatNumber(maxMorningWind, " mph")}.`
+    text: `${windSource || "Hourly wind forecast"} reaches ${formatNumber(maxMorningWind, " mph")} during the morning screen.`
   });
   reasons.push({
     type: "warn",
@@ -2565,7 +2619,7 @@ function getSpearfishingMetrics(item) {
       value: item.risks.confidence,
       detail: item.sourceSummary.alerts.length
         ? `NWS alert screen returned ${summarizeAlerts(item.sourceSummary.alerts)} for this candidate.`
-        : "Physical-condition screen loaded independently; legal fishing water is treated as preselected for this spot."
+        : `Wind source: ${item.sourceSummary.windSource || "unknown"}; legal fishing water is treated as preselected for this spot.`
     }
   ];
 }

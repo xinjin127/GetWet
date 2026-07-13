@@ -11,6 +11,7 @@ const CACHE_DIR = path.join(ROOT, ".cache", "http");
 const ALLOWED_HOSTS = new Set([
   "api.weather.gov",
   "api.tidesandcurrents.noaa.gov",
+  "api.open-meteo.com",
   "marine-api.open-meteo.com",
   "wildlife.ca.gov",
   "www.cdph.ca.gov",
