@@ -1557,16 +1557,16 @@ function evaluateSpearfishingCandidate(candidate) {
     verdict,
     headlineVerdict: verdict.includes("NO GO") ? `NO GO: ${headlineReason}` : verdict,
     headlineReason,
-    bestWindow: selectedWindow
+    bestWindow: !selectedWindow?.complete ? "No complete morning forecast yet" : selectedWindow
       ? `${selectedWindow.dayName} 6-11am ${selectedWindow.status === "go" ? "looks diveable" : selectedWindow.status === "maybe" ? "is marginal" : "does not clear the screen"}`
       : "No Sat/Sun morning window found",
-    returnBy: "Before late-morning wind and surge build",
+    returnBy: verdict.startsWith("GO") || verdict.startsWith("MAYBE") ? "Before noon; morning screen ends at 11am" : null,
     score: physicalScore,
     risks: {
       surge: describeSurge(selectedWindow?.maxWave ?? avgMorningWave, maxMorningSwellPeriod, candidate.exposure),
       visibility: inferVisibility(avgMorningWave, maxMorningSwellPeriod),
       legal: candidate.legalStatus,
-      confidence: hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence",
+      confidence: !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `Low: ${summarizeAlerts(candidate.alerts)}` : "Medium condition confidence",
       physical: physicalBlocker.label,
       resolution: resolutionChecklist
     },
