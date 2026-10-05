@@ -1,7 +1,5 @@
-import crypto from "node:crypto";
-
-const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 3 * 60 * 60 * 1000);
-const MAX_CACHE_ENTRIES = Number(process.env.MAX_CACHE_ENTRIES || 250);
+const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 250;
 const ALLOWED_HOSTS = new Set([
   "api.weather.gov",
   "api.tidesandcurrents.noaa.gov",
@@ -17,7 +15,7 @@ const cache = globalThis.launchWindowFetchCache || new Map();
 globalThis.launchWindowFetchCache = cache;
 
 function cacheKeyFor(url) {
-  return crypto.createHash("sha256").update(url).digest("hex");
+  return url;
 }
 
 function pruneCache() {
@@ -40,7 +38,7 @@ function responseFromPayload(payload, cacheStatus) {
       "content-type": payload.contentType,
       "x-launch-cache": cacheStatus,
       "x-launch-cache-saved-at": payload.savedAt,
-      "cache-control": "public, s-maxage=10800, stale-while-revalidate=3600"
+      "cache-control": "no-store"
     }
   });
 }
@@ -56,7 +54,7 @@ export async function GET(request) {
     const cached = cache.get(key);
     if (cached) {
       const age = Date.now() - new Date(cached.savedAt).getTime();
-      if (Number.isFinite(age) && age <= CACHE_TTL_MS) {
+      if (Number.isFinite(age) && age >= 0 && age <= CACHE_TTL_MS) {
         return responseFromPayload(cached, "HIT");
       }
       cache.delete(key);
@@ -67,6 +65,8 @@ export async function GET(request) {
         accept: request.headers.get("accept") || "*/*",
         "user-agent": "LaunchWindowPOC/1.0"
       },
+      signal: AbortSignal.timeout(15000),
+      redirect: "error",
       cache: "no-store"
     });
     const body = await upstream.arrayBuffer();

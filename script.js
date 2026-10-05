@@ -252,13 +252,21 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v19";
+const CACHE_VERSION = "launch-window-v21";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
 
 function getSelectedWeekend() {
-  return getUpcomingWeekend(new Date(), appState.weekendOffset);
+  return getUpcomingWeekend(pacificNow(), appState.weekendOffset);
+}
+
+function pacificNow() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+}
+
+function pacificWallTime(value) {
+  return new Date(new Date(value).toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
 }
 
 function getSelectedWeekendRange() {
@@ -302,7 +310,7 @@ function formatWeekendRange({ saturday, sunday }) {
 function getWeekendOptions() {
   return Array.from({ length: MAX_WEEKEND_OFFSET + 1 }, (_, offset) => ({
     offset,
-    label: formatWeekendRange(getUpcomingWeekend(new Date(), offset))
+    label: formatWeekendRange(getUpcomingWeekend(pacificNow(), offset))
   }));
 }
 
@@ -347,11 +355,15 @@ async function fetchViaCache(url, accept) {
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
 
     const cacheHeader = response.headers.get("x-launch-cache");
+    const savedAt = response.headers.get("x-launch-cache-saved-at");
+    if (savedAt && Number.isFinite(Date.parse(savedAt))) {
+      appState.cache.oldestSourceAt = Math.min(appState.cache.oldestSourceAt || Date.now(), Date.parse(savedAt));
+    }
     if (cacheHeader) {
       recordServerCacheHeader(cacheHeader);
     }
 
-    return response.text();
+    return await response.text();
   } catch (error) {
     if (error.name === "AbortError") {
       throw new Error(`Timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s: ${url}`);
@@ -426,13 +438,13 @@ async function loadCrabbingData() {
 
 async function loadSpearfishingData() {
   const spearfishing = missionConfig.spearfishing;
-  const candidateResults = await Promise.all(spearfishing.candidates.map(async (candidate) => ({
-    ...candidate,
-    weather: await fetchNwsWeather(candidate.coords),
-    marine: await fetchMarineForecast(candidate.coords),
-    alerts: await fetchAlerts(candidate.coords),
-    legalMap: await fetchSpearfishingLegalMap(candidate)
-  })));
+  const candidateResults = await Promise.all(spearfishing.candidates.map(async (candidate) => {
+    const [weather, marine, alerts, legalMap] = await Promise.all([
+      fetchNwsWeather(candidate.coords), fetchMarineForecast(candidate.coords),
+      fetchAlerts(candidate.coords), fetchSpearfishingLegalMap(candidate)
+    ]);
+    return { ...candidate, weather, marine, alerts, legalMap };
+  }));
   const spearfishingDecisions = candidateResults
     .map((candidate) => evaluateSpearfishingCandidate(candidate))
     .sort((a, b) => b.score - a.score);
@@ -446,12 +458,13 @@ async function loadSpearfishingData() {
 
 async function loadClammingData() {
   const clamming = missionConfig.clamming;
-  const [tides, weather, marine, alerts, clammingStatus] = await Promise.all([
+  const [tides, weather, marine, alerts, clammingStatus, daylight] = await Promise.all([
     fetchTides({ station: clamming.tideStation }),
     fetchNwsWeather(clamming.coords),
     fetchMarineForecast(clamming.coords),
     fetchAlerts(clamming.coords),
-    fetchClammingStatus(clamming)
+    fetchClammingStatus(clamming),
+    fetchDaylight(clamming.coords)
   ]);
   return evaluateClamming({
     config: clamming,
@@ -459,8 +472,20 @@ async function loadClammingData() {
     marine,
     tides,
     alerts,
-    clammingStatus
+    clammingStatus,
+    daylight
   });
+}
+
+async function fetchDaylight(coords) {
+  const weekend = getSelectedWeekend();
+  const params = new URLSearchParams({ ...coords, daily: "sunrise,sunset", timezone: "America/Los_Angeles", start_date: toIsoDate(weekend.saturday), end_date: toIsoDate(weekend.sunday) });
+  try {
+    const data = await fetchJson(`${sourceConfig.weather.url}?${params}`);
+    return (data.daily?.time || []).map((day, index) => ({ day, sunrise: data.daily.sunrise[index], sunset: data.daily.sunset[index] }));
+  } catch {
+    return [];
+  }
 }
 
 async function loadCachedOrFreshData({ forceRefresh = false } = {}) {
@@ -538,7 +563,7 @@ function readCachedData(cacheKey) {
     const cached = JSON.parse(raw);
     if (!cached?.savedAt || !cached?.data) return null;
     const age = Date.now() - new Date(cached.savedAt).getTime();
-    if (!Number.isFinite(age) || age > CACHE_TTL_MS) {
+    if (!Number.isFinite(age) || age < 0 || age > CACHE_TTL_MS) {
       localStorage.removeItem(cacheKey);
       return null;
     }
@@ -549,9 +574,15 @@ function readCachedData(cacheKey) {
 }
 
 function writeCachedData(cacheKey, data) {
+  const decisions = [data.crabbing, ...(data.spearfishing?.options || [])];
+  if (decisions.some((item) => !item?.sourceSummary?.selectedWindow?.complete)
+    || !data.clamming?.sourceSummary?.waveSeries?.length
+    || !data.clamming?.sourceSummary?.windSeries?.length
+    || !data.crabbing?.sourceSummary?.cdfwCrabStatus?.health?.sourceAvailable
+    || !data.clamming?.sourceSummary?.clammingStatus?.cdph?.sourceAvailable) return;
   try {
     localStorage.setItem(cacheKey, JSON.stringify({
-      savedAt: new Date().toISOString(),
+      savedAt: new Date(appState.cache.oldestSourceAt || Date.now()).toISOString(),
       data
     }));
   } catch {
@@ -620,8 +651,13 @@ async function fetchNwsWeather(coords) {
     const point = await fetchJson(`${sourceConfig.nws.pointsUrl}/${coords.latitude},${coords.longitude}`);
     const hourlyUrl = point.properties.forecastHourly;
     const hourly = await fetchJson(hourlyUrl);
-    const periods = filterWeekendHours(hourly.properties.periods || []);
-    if (periods.length) {
+    const periods = filterWeekendHours((hourly.properties.periods || []).map((period) => ({
+      ...period,
+      startTime: toWallTimeString(pacificWallTime(period.startTime)),
+      windSpeed: period.windSpeed
+    })));
+    const weekend = getSelectedWeekend();
+    if ([weekend.saturday, weekend.sunday].every((date) => morningHoursForDate(periods, date).length === 6)) {
       return {
         sourceUrl: hourlyUrl,
         sourceName: sourceConfig.nws.name,
@@ -641,7 +677,7 @@ async function fetchOpenMeteoWind(coords) {
     longitude: coords.longitude,
     hourly: ["wind_speed_10m", "wind_direction_10m"].join(","),
     wind_speed_unit: "mph",
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
+    timezone: "America/Los_Angeles",
     start_date: toIsoDate(weekend.saturday),
     end_date: toIsoDate(weekend.sunday)
   });
@@ -662,12 +698,26 @@ async function fetchOpenMeteoWind(coords) {
 }
 
 async function fetchAlerts(coords) {
-  if (appState.weekendOffset > 0) return [];
   const params = new URLSearchParams({
     point: `${coords.latitude},${coords.longitude}`
   });
   const data = await fetchJson(`${sourceConfig.nws.alertsUrl}?${params}`);
-  return (data.features || []).map((feature) => feature.properties);
+  return (data.features || []).map((feature) => feature.properties).filter(isRelevantWeekendAlert);
+}
+
+function isRelevantWeekendAlert(alert) {
+  if (alert.status && alert.status !== "Actual") return false;
+  if (!/marine|small craft|gale|storm|hurricane|surf|tsunami|coastal flood|wind|thunderstorm|tornado|waterspout|dense fog|lightning/i.test(alert.event || "")) return false;
+  const start = pacificWallTime(alert.onset || alert.effective);
+  const end = pacificWallTime(alert.ends || alert.expires);
+  const weekend = getSelectedWeekend();
+  const weekendEnd = new Date(weekend.sunday);
+  weekendEnd.setDate(weekendEnd.getDate() + 1);
+  return Number.isFinite(+start) && Number.isFinite(+end) && start < weekendEnd && end > weekend.saturday;
+}
+
+function toWallTimeString(date) {
+  return `${toIsoDate(date)}T${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:00`;
 }
 
 async function fetchMarineForecast(coords) {
@@ -686,7 +736,7 @@ async function fetchMarineForecast(coords) {
     ].join(","),
     wind_speed_unit: "mph",
     length_unit: "imperial",
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles",
+    timezone: "America/Los_Angeles",
     start_date: toIsoDate(weekend.saturday),
     end_date: toIsoDate(weekend.sunday)
   });
@@ -815,8 +865,9 @@ async function fetchCdfwCrabStatus(config) {
 function getCdfwDungenessSeasonWindow(baseDate, countyGroup) {
   const year = baseDate.getFullYear();
   const month = baseDate.getMonth();
-  const seasonStartYear = month >= 10 ? year : year - 1;
+  const seasonStartYear = month >= 7 ? year : year - 1;
   const start = new Date(seasonStartYear, 10, 1);
+  start.setDate(1 + ((6 - start.getDay() + 7) % 7));
   const endMonth = countyGroup === "mendocino and north" ? 6 : 5;
   const endDay = countyGroup === "mendocino and north" ? 30 : 30;
   const end = new Date(seasonStartYear + 1, endMonth, endDay, 23, 59, 59);
@@ -824,9 +875,7 @@ function getCdfwDungenessSeasonWindow(baseDate, countyGroup) {
   return {
     start,
     end,
-    label: countyGroup === "mendocino and north"
-      ? "Nov 1 - Jul 30 for Mendocino County and north"
-      : "Nov 1 - Jun 30 for San Francisco and other counties"
+    label: `${start.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}; first Saturday in November, subject to CDFW closures`
   };
 }
 
@@ -859,13 +908,18 @@ function parseCdfwHealthStatus(html) {
 
 function parseCdfwWhaleSafeStatus(html, rampZone) {
   const text = normalizeText(html);
-  const recreationalSection = extractBetween(text, "Recreational Fishery:", "Risk Assessment and Mitigation Program") || text;
-  const zonePattern = new RegExp(`Zones?[^.\\n]*${rampZone}[^.\\n]*(Crab Trap Prohibition|Season Closed|Open to all permitted methods|Fleet Advisory)`, "i");
-  const broadTrapPattern = /Fishing Zones? 3-5:\s*Crab Trap Prohibition/i;
-  const allPermittedPattern = /Fishing Zones?[^.]*4[^.]*Open to all permitted methods/i;
-  const matched = recreationalSection.match(zonePattern);
+  const recreationalSection = extractBetween(text, "Recreational Fishery:", "Risk Assessment and Mitigation Program");
+  const entries = [...recreationalSection.matchAll(/Fishing Zones?\s+([1-6](?:\s*(?:-|,|and|&)\s*[1-6])*)\s*:\s*([\s\S]*?)(?=Fishing Zones?\s+[1-6]|$)/gi)];
+  const entry = entries.find((match) => {
+    const zones = match[1].replace(/([1-6])\s*-\s*([1-6])/g, (_, a, b) => Array.from({ length: Number(b) - Number(a) + 1 }, (_, i) => Number(a) + i).join(","));
+    return (zones.match(/[1-6]/g) || []).includes(String(rampZone));
+  });
+  const zoneText = entry?.[2] || (!/Fishing Zones?/i.test(recreationalSection) && /Season (?:is )?closed/i.test(recreationalSection) ? "Season closed" : "");
+  if (/Season (?:is )?closed/i.test(zoneText)) {
+    return { status: "Season closed", detail: "CDFW's current recreational fishery status says the season is closed. An upcoming statutory opener is not confirmation that gear restrictions have been lifted.", sourceAvailable: true };
+  }
 
-  if (broadTrapPattern.test(recreationalSection) || /Crab Trap Prohibition/i.test(matched?.[0] || "")) {
+  if (/Crab Trap Prohibition/i.test(zoneText)) {
     return {
       status: "Crab trap prohibition",
       detail: `CDFW Whale Safe Fisheries lists a recreational crab trap prohibition affecting Fishing Zone ${rampZone}.`,
@@ -873,7 +927,7 @@ function parseCdfwWhaleSafeStatus(html, rampZone) {
     };
   }
 
-  if (allPermittedPattern.test(recreationalSection) || /Open to all permitted methods/i.test(matched?.[0] || "")) {
+  if (/Open to all permitted methods/i.test(zoneText)) {
     return {
       status: "Open to all permitted methods",
       detail: `CDFW Whale Safe Fisheries indicates Fishing Zone ${rampZone} is open to all permitted recreational crab methods.`,
@@ -1056,11 +1110,12 @@ function getLawsonsClammingBaseline() {
 function getCdfwCombinedStatus({ inStatutorySeason, health, whaleSafe }) {
   if (!inStatutorySeason) return "Closed by season date";
   if (health.status === "Possible closure language found") return "Possible health closure";
-  if (whaleSafe.status === "Crab trap prohibition") return "Trap prohibition";
+  if (whaleSafe.status === "Season closed") return "CDFW recreational season closed";
   if (!health.sourceAvailable
     || !whaleSafe.sourceAvailable
     || health.status === "No matching Dungeness status found"
     || whaleSafe.status === "Unparsed") return "Automatic CDFW check incomplete";
+  if (whaleSafe.status === "Crab trap prohibition") return "Trap prohibition";
   return "Season appears open, subject to method and day-of checks";
 }
 
@@ -1068,7 +1123,10 @@ function normalizeText(value) {
   return String(value || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&ndash;|&mdash;|&#8211;|&#8212;/gi, "-")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -1083,22 +1141,33 @@ function extractBetween(text, startNeedle, endNeedle) {
 function normalizeMarineHours(hourly) {
   return (hourly.time || []).map((time, index) => ({
     startTime: time,
-    waveHeight: Number(hourly.wave_height?.[index]),
-    wavePeriod: Number(hourly.wave_period?.[index]),
-    waveDirection: Number(hourly.wave_direction?.[index]),
-    swellHeight: Number(hourly.swell_wave_height?.[index]),
-    swellPeriod: Number(hourly.swell_wave_period?.[index]),
-    swellDirection: Number(hourly.swell_wave_direction?.[index]),
-    windWaveHeight: Number(hourly.wind_wave_height?.[index])
+    waveHeight: finiteValue(hourly.wave_height?.[index]),
+    wavePeriod: finiteValue(hourly.wave_period?.[index]),
+    waveDirection: finiteValue(hourly.wave_direction?.[index]),
+    swellHeight: finiteValue(hourly.swell_wave_height?.[index]),
+    swellPeriod: finiteValue(hourly.swell_wave_period?.[index]),
+    swellDirection: finiteValue(hourly.swell_wave_direction?.[index]),
+    windWaveHeight: finiteValue(hourly.wind_wave_height?.[index])
   }));
 }
 
 function normalizeOpenMeteoWindHours(hourly) {
   return (hourly.time || []).map((time, index) => ({
     startTime: time,
-    windSpeed: Number(hourly.wind_speed_10m?.[index]),
-    windDirection: Number(hourly.wind_direction_10m?.[index])
+    windSpeed: finiteValue(hourly.wind_speed_10m?.[index]),
+    windDirection: finiteValue(hourly.wind_direction_10m?.[index])
   }));
+}
+
+function finiteValue(value) {
+  return value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
+}
+
+function hasCompleteMorning(weather, marine) {
+  const hours = (rows, valid) => new Set(rows.filter(valid).map((row) => new Date(row.startTime).getHours()));
+  const windHours = hours(weather, (row) => Number.isFinite(parseWindMph(row.windSpeed)));
+  const waveHours = hours(marine, (row) => [row.waveHeight, row.swellHeight, row.swellPeriod].every(Number.isFinite));
+  return [6, 7, 8, 9, 10, 11].every((hour) => windHours.has(hour) && waveHours.has(hour));
 }
 
 function filterWeekendHours(periods) {
@@ -1176,11 +1245,12 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   const maxMorningSwellHeight = maxNumber(marineMorning.map((hour) => hour.swellHeight));
   const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
   const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
-  const hasAdvisory = alerts.length > 0;
-  const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config });
-  const bestGoWindow = windows.find((window) => window.status === "go");
-  const bestMaybeWindow = windows.find((window) => window.status === "maybe");
+  const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config, alerts });
+  const bestGoWindow = windows.find((window) => window.status === "go" && window.legalDay);
+  const bestMaybeWindow = windows.find((window) => window.status === "maybe" && window.legalDay);
   const selectedWindow = bestGoWindow || bestMaybeWindow || windows[0] || null;
+  alerts = selectedWindow?.alerts || alerts;
+  const hasAdvisory = alerts.length > 0;
   const cdfwAllowed = cdfwAllowsCrabbing(cdfwCrabStatus);
 
   let verdict = "NO GO THIS WEEKEND";
@@ -1202,6 +1272,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     bestWindow = "No Sat/Sun crab window selected";
     returnBy = null;
   }
+  if (cdfwAllowed && !selectedWindow?.complete) verdict = "PENDING FORECAST";
 
   const headlineReason = getCrabbingHeadlineReason({
     cdfwCrabStatus,
@@ -1240,9 +1311,9 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     risks: {
       entryExit: selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
       windDrift: selectedWindow?.maxWind !== null && selectedWindow?.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
-      current: "High caution",
-      currentDetail: "China Beach sits inside the Golden Gate influence zone; paddle return current remains a standing caution for this launch.",
-      confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded"
+      current: "Current not measured",
+      currentDetail: "NOAA tide height does not measure tidal-current speed. This screen grades wind, waves and swell only; Golden Gate return currents have not been evaluated.",
+      confidence: !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
     },
     reasons: buildCrabbingReasons({
       maxMorningWind,
@@ -1260,7 +1331,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   };
 }
 
-function buildCrabbingMorningWindows({ weather, marine, config }) {
+function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
   const weekend = getSelectedWeekend();
   return [weekend.saturday, weekend.sunday]
     .map((date) => {
@@ -1270,7 +1341,11 @@ function buildCrabbingMorningWindows({ weather, marine, config }) {
       const maxWave = maxNumber(marineHours.map((hour) => hour.waveHeight));
       const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
       const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
-      const status = gradeCrabbingWindow({
+      const complete = hasCompleteMorning(weatherHours, marineHours);
+      const windowAlerts = alertsForMorning(alerts, date);
+      const season = getCdfwDungenessSeasonWindow(date, config.cdfwCountyGroup);
+      const legalDay = date >= season.start && date <= season.end;
+      const status = !complete || windowAlerts.length ? "no-go" : gradeCrabbingWindow({
         maxWind,
         maxWave,
         maxSwellPeriod,
@@ -1285,10 +1360,21 @@ function buildCrabbingMorningWindows({ weather, marine, config }) {
         maxWave,
         maxSwellPeriod,
         maxSwellHeight,
+        complete,
+        legalDay,
+        alerts: windowAlerts,
         status
       };
     })
     .sort((a, b) => getCrabbingWindowRank(b.status) - getCrabbingWindowRank(a.status));
+}
+
+function alertsForMorning(alerts, date) {
+  const start = new Date(date);
+  start.setHours(6);
+  const end = new Date(date);
+  end.setHours(12);
+  return alerts.filter((alert) => pacificWallTime(alert.onset || alert.effective) < end && pacificWallTime(alert.ends || alert.expires) > start);
 }
 
 function morningHoursForDate(hours, date) {
@@ -1300,7 +1386,7 @@ function morningHoursForDate(hours, date) {
 }
 
 function gradeCrabbingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
-  if (!Number.isFinite(maxWind) || !Number.isFinite(maxWave) || !Number.isFinite(maxSwellPeriod)) return "no-go";
+  if (![maxWind, maxWave, maxSwellPeriod, maxSwellHeight].every(Number.isFinite)) return "no-go";
   if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.go })) return "go";
   if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.maybe })) return "maybe";
   return "no-go";
@@ -1323,16 +1409,17 @@ function getCrabbingWindowRank(status) {
 
 function cdfwAllowsCrabbing(cdfwCrabStatus) {
   return cdfwCrabStatus.inStatutorySeason
-    && cdfwCrabStatus.status !== "Possible health closure"
-    && cdfwCrabStatus.status !== "Automatic CDFW check incomplete";
+    && cdfwCrabStatus.status === "Season appears open, subject to method and day-of checks";
 }
 
 function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, maxMorningSwellPeriod, maxMorningWind, selectedWindow }) {
   if (!cdfwCrabStatus.inStatutorySeason) return "CDFW SEASON CLOSED";
+  if (cdfwCrabStatus.status === "CDFW recreational season closed") return "CDFW RECREATIONAL SEASON CLOSED";
   if (cdfwCrabStatus.status === "Possible health closure") return "POSSIBLE CDFW HEALTH CLOSURE";
   if (cdfwCrabStatus.status === "Automatic CDFW check incomplete") return "CDFW STATUS UNVERIFIED";
   if (cdfwCrabStatus.status === "Trap prohibition") return "CRAB TRAP PROHIBITION";
   if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
+  if (!selectedWindow?.complete) return "FORECAST INCOMPLETE FOR 6-11AM";
   if (selectedWindow?.maxWave !== null && selectedWindow?.maxWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
   if (selectedWindow?.maxWind !== null && selectedWindow?.maxWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
   if (selectedWindow?.maxSwellHeight > missionConfig.crabbing.thresholds.maybe.maxSwellHeightFeet
@@ -1340,7 +1427,7 @@ function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, max
   if (maxMorningWave !== null && maxMorningWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
   if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 16) return "LONG-PERIOD SWELL";
   if (maxMorningWind !== null && maxMorningWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
-  return "CONSERVATIVE THRESHOLDS NOT MET";
+  return selectedWindow?.status === "go" ? "WAVES, WIND AND SWELL WITHIN GO LIMITS" : "MARGINAL WAVES, WIND OR SWELL";
 }
 
 function summarizeAlerts(alerts) {
@@ -1414,6 +1501,7 @@ function evaluateSpearfishingCandidate(candidate) {
     || windows.find((window) => window.status === "maybe")
     || windows[0]
     || null;
+  candidate = { ...candidate, alerts: selectedWindow?.alerts || candidate.alerts };
   const marineMorning = morningHours(allMarine);
   const weatherMorning = morningHours(allWeather);
   const avgMorningWave = selectedWindow?.avgWave ?? averageNumber(marineMorning.map((hour) => hour.waveHeight));
@@ -1437,6 +1525,7 @@ function evaluateSpearfishingCandidate(candidate) {
   let verdict = "NO GO THIS WEEKEND";
   if (!hasAdvisory && selectedWindow?.status === "maybe") verdict = `MAYBE ${selectedWindow.dayName.toUpperCase()} MORNING`;
   if (!hasAdvisory && selectedWindow?.status === "go" && candidate.legalStatus === "Known legal water assumed") verdict = `GO ${selectedWindow.dayName.toUpperCase()} MORNING`;
+  if (!selectedWindow?.complete) verdict = "PENDING FORECAST";
   const headlineReason = getSpearfishingHeadlineReason({
     hasAdvisory,
     alerts: candidate.alerts,
@@ -1530,7 +1619,9 @@ function buildSpearfishingMorningWindows({ candidate, weather, marine, threshold
       const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
       const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
       const maxWind = maxNumber(weatherHours.map((period) => parseWindMph(period.windSpeed)));
-      const status = gradeSpearfishingWindow({
+      const complete = hasCompleteMorning(weatherHours, marineHours);
+      const windowAlerts = alertsForMorning(candidate.alerts || [], date);
+      const status = !complete || windowAlerts.length ? "no-go" : gradeSpearfishingWindow({
         maxWind,
         maxWave,
         maxSwellPeriod,
@@ -1555,6 +1646,8 @@ function buildSpearfishingMorningWindows({ candidate, weather, marine, threshold
         maxSwellPeriod,
         maxSwellHeight,
         maxWind,
+        complete,
+        alerts: windowAlerts,
         status,
         score
       };
@@ -1563,7 +1656,7 @@ function buildSpearfishingMorningWindows({ candidate, weather, marine, threshold
 }
 
 function gradeSpearfishingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
-  if (!Number.isFinite(maxWind) || !Number.isFinite(maxWave) || !Number.isFinite(maxSwellPeriod)) return "no-go";
+  if (![maxWind, maxWave, maxSwellPeriod, maxSwellHeight].every(Number.isFinite)) return "no-go";
   if (passesSpearfishingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.go })) return "go";
   if (passesSpearfishingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.maybe })) return "maybe";
   return "no-go";
@@ -1602,10 +1695,10 @@ function getSpearfishingPhysicalBlocker({ selectedWindow, thresholds, exposure }
   }
 
   const issues = [];
-  if (!Number.isFinite(selectedWindow.maxWave) || !Number.isFinite(selectedWindow.maxWind) || !Number.isFinite(selectedWindow.maxSwellPeriod)) {
+  if (!selectedWindow.complete || !Number.isFinite(selectedWindow.maxWave) || !Number.isFinite(selectedWindow.maxWind) || !Number.isFinite(selectedWindow.maxSwellPeriod)) {
     return {
-      label: "FORECAST DATA UNAVAILABLE",
-      detail: `${selectedWindow.dayName} 6-11am is outside at least one source forecast horizon, so the app cannot grade waves, wind, and swell for this beach.`
+      label: "FORECAST INCOMPLETE FOR 6-11AM",
+      detail: `${selectedWindow.dayName} does not have six matching hours of wind, waves and swell. The source may not yet cover this date, or its request failed; missing values are not calm conditions.`
     };
   }
   if (selectedWindow.maxWave > thresholds.go.maxWaveFeet) {
@@ -1667,12 +1760,20 @@ function isCdphShellfishClear(cdphStatus) {
   return cdphStatus?.status === "No active Marin/Tomales advisory found";
 }
 
-function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus }) {
+function evaluateClamming({ config, weather, marine, tides, alerts, clammingStatus, daylight = [] }) {
   const allWeather = weather.periods;
   const allMarine = marine;
-  const lowTideWindows = buildClammingLowTideWindows(tides, clammingStatus.lawsons.tideThresholdFeet || config.thresholds.maxTideFeet);
+  const lowTideWindows = buildClammingLowTideWindows(tides, clammingStatus.lawsons.tideThresholdFeet ?? config.thresholds.maxTideFeet, daylight);
   const daylightWindows = lowTideWindows.filter((window) => window.isDaylight);
-  const bestWindowMatch = daylightWindows[0] || lowTideWindows[0] || null;
+  const bestWindowMatch = [...daylightWindows].sort((a, b) => {
+    const score = (window) => {
+      const wind = maxNumber(getWeatherNearTime(allWeather, window.time).map((period) => parseWindMph(period.windSpeed)));
+      const wave = maxNumber(getMarineNearTime(allMarine, window.time).map((hour) => hour.waveHeight));
+      if (wind === null || wave === null) return Infinity;
+      return Math.max(wind / config.thresholds.maxWindMph, wave / config.thresholds.maxWaveFeet);
+    };
+    return score(a) - score(b) || a.time - b.time;
+  })[0] || lowTideWindows[0] || null;
   const windowWeather = bestWindowMatch ? getWeatherNearTime(allWeather, bestWindowMatch.time) : [];
   const windowMarine = bestWindowMatch ? getMarineNearTime(allMarine, bestWindowMatch.time) : [];
   const maxWindowWind = maxNumber(windowWeather.map((period) => parseWindMph(period.windSpeed)));
@@ -1708,11 +1809,9 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
   let verdict = "NO GO THIS WEEKEND";
   if (hasGoodTide && calmEnough && !hasAdvisory && !shellfishBlocked && rulesParsed) {
     verdict = "GO FOR LOW TIDE";
-  } else if (hasGoodTide && !shellfishBlocked && rulesParsed && !hasAdvisory) {
-    verdict = "MAYBE LOW TIDE";
   }
 
-  const headlineReason = getClammingHeadlineReason({
+  let headlineReason = getClammingHeadlineReason({
     shellfishBlocked,
     rulesParsed,
     hasGoodTide,
@@ -1723,6 +1822,10 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
     physicalBlocker,
     clammingStatus
   });
+  if (!shellfishBlocked && (!daylight.length || (hasGoodTide && (!Number.isFinite(maxWindowWind) || !Number.isFinite(maxWindowWave))))) {
+    verdict = "PENDING FORECAST";
+    headlineReason = !daylight.length ? "SUNRISE/SUNSET DATA UNAVAILABLE" : "WIND OR WAVE FORECAST INCOMPLETE";
+  }
 
   return {
     spot: config.spot,
@@ -1752,7 +1855,7 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
       clammingStatus
     },
     risks: {
-      tideAccess: hasGoodTide ? "Exposes mudflats" : "No daylight exposure",
+      tideAccess: hasGoodTide ? "Low proxy tide in daylight" : "No daylight low proxy tide",
       windMudflat: calmEnough ? "Calm enough window" : "Wind/surf can erase the window",
       shellfishHealth: clammingStatus.cdph.status,
       confidence: hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Live data loaded",
@@ -1775,7 +1878,7 @@ function evaluateClamming({ config, weather, marine, tides, alerts, clammingStat
   };
 }
 
-function buildClammingLowTideWindows(tideEvents, thresholdFeet) {
+function buildClammingLowTideWindows(tideEvents, thresholdFeet, daylight = []) {
   return (tideEvents || [])
     .map((event) => ({
       time: new Date(event.t),
@@ -1785,14 +1888,14 @@ function buildClammingLowTideWindows(tideEvents, thresholdFeet) {
     .filter((event) => event.tideFeet <= thresholdFeet)
     .map((event) => ({
       ...event,
-      isDaylight: isClammingDaylight(event.time)
+      isDaylight: isClammingDaylight(event.time, daylight)
     }))
     .sort((a, b) => a.time - b.time);
 }
 
-function isClammingDaylight(date) {
-  const hour = date.getHours();
-  return hour >= 6 && hour <= 20;
+function isClammingDaylight(date, daylight) {
+  const sun = daylight.find((entry) => entry.day === toIsoDate(date));
+  return Boolean(sun && date >= new Date(sun.sunrise) && date <= new Date(sun.sunset));
 }
 
 function getWeatherNearTime(periods, time) {
@@ -2090,7 +2193,7 @@ function renderSurfGraph(waveSeries, windSeries) {
         <div>
           <span>Surf trend</span>
           <strong>${formatNumber(maxWave, " ft")} max waves · ${formatNumber(maxPeriod, " sec")} max period</strong>
-          <em>${escapeHtml(sourceConfig.ndbc.name)} reference · forecast grid from ${escapeHtml(sourceConfig.marine.name)}</em>
+          <em>Open-Meteo marine model at the selected coordinates; not a buoy observation</em>
         </div>
         <p>${formatNumber(maxWind, " mph")} max wind</p>
       </div>
@@ -2108,16 +2211,12 @@ function renderSurfGraph(waveSeries, windSeries) {
         <text x="2" y="21" class="graph-label">${formatNumber(maxWave, " ft")}</text>
         <text x="8" y="62" class="graph-label">${formatNumber(maxWave / 2, " ft")}</text>
         <text x="18" y="103" class="graph-label">0</text>
-        <text x="7" y="143" class="graph-axis-title">y: wave ft / period sec / wind mph</text>
-        ${windBars}
+        <text x="7" y="143" class="graph-axis-title">y: wave height (ft) · x: Pacific time</text>
         <polyline points="${wavePoints}" class="graph-fill-line"></polyline>
-        <polyline points="${periodPoints}" class="graph-period-line"></polyline>
         ${timeLabels}
       </svg>
       <div class="graph-legend">
         <span><i class="legend-wave"></i>Wave height</span>
-        <span><i class="legend-period"></i>Swell period</span>
-        <span><i class="legend-wind"></i>Wind</span>
       </div>
     </article>
   `;
@@ -2132,8 +2231,8 @@ function renderTideGraph(tideEvents) {
   const maxTide = maxNumber(events.map((event) => event.value)) ?? 1;
   const range = Math.max(1, maxTide - minTide);
   const points = events.map((event, index) => {
-    const x = 36 + (index / Math.max(1, events.length - 1)) * 220;
-    const y = 100 - ((event.value - minTide) / range) * 76;
+    const x = chartTimeX(event.t, 220);
+    const y = 100 - ((event.value - minTide) / range) * 82;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
   const tideTimeLabels = buildFixedHourAxisLabels();
@@ -2159,8 +2258,8 @@ function renderTideGraph(tideEvents) {
         <polyline points="${points}" class="graph-tide-line"></polyline>
         ${events.map((event, index) => {
           if (event.type !== "H" && event.type !== "L") return "";
-          const x = 36 + (index / Math.max(1, events.length - 1)) * 220;
-          const y = 100 - ((event.value - minTide) / range) * 76;
+          const x = chartTimeX(event.t, 220);
+          const y = 100 - ((event.value - minTide) / range) * 82;
           return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.4" class="${event.type === "H" ? "tide-high-dot" : "tide-low-dot"}"></circle>`;
         }).join("")}
         ${tideTimeLabels}
@@ -2175,13 +2274,18 @@ function renderTideGraph(tideEvents) {
 }
 
 function buildChartPoints(series, key, maxValue, width, height) {
-  return series.map((point, index) => {
-    const value = Number(point[key]);
-    const safeValue = Number.isFinite(value) ? value : 0;
-    const x = 36 + (index / Math.max(1, series.length - 1)) * width;
-    const y = 100 - (safeValue / Math.max(1, maxValue)) * height;
+  return series.filter((point) => Number.isFinite(point[key])).map((point) => {
+    const value = point[key];
+    const x = chartTimeX(point.time, width);
+    const y = 100 - (value / Math.max(1, maxValue)) * height;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
+}
+
+function chartTimeX(value, width) {
+  const date = new Date(value);
+  const dayOffset = toIsoDate(date) === toIsoDate(getSelectedWeekend().sunday) ? 24 : 0;
+  return 36 + ((dayOffset + date.getHours() + date.getMinutes() / 60) / 48) * width;
 }
 
 function buildFixedHourAxisLabels() {
@@ -2229,8 +2333,8 @@ function renderSourceLinks() {
 function getWaterSourceMetric(tideSource) {
   return {
     label: "Water data source",
-    value: `${sourceConfig.ndbc.station} buoy / ${tideSource.station} tide`,
-    detail: `${sourceConfig.ndbc.detail} is shown as the offshore wave reference; hourly tides use ${tideSource.name}. Wave forecasts are pulled from the Open-Meteo marine grid at the selected spot coordinates.`
+    value: tideSource ? `Marine model / NOAA ${tideSource.station} tides` : "Open-Meteo marine model",
+    detail: `Waves are Open-Meteo grid forecasts, not live buoy readings. ${tideSource ? `Hourly tides use ${tideSource.name}.` : "No local tide predictions are used for this beach."} No buoy observations or tidal-current predictions are used in this assessment.`
   };
 }
 
@@ -2557,12 +2661,12 @@ function renderCrabbing() {
         {
           label: "Entry / exit risk",
           value: data.risks.entryExit,
-          detail: `Morning wave height reaches ${formatNumber(summary.maxMorningWave, " ft")}; exposed beach launches need a calm exit and return.`
+          detail: `${summary.selectedWindow?.dayName || "Selected"} 6-11am waves reach ${formatNumber(summary.selectedWindow?.maxWave, " ft")}; whole-weekend morning maximum ${formatNumber(summary.maxMorningWave, " ft")}.`
         },
         {
           label: "Wind drift risk",
           value: data.risks.windDrift,
-          detail: `NWS morning wind reaches ${formatNumber(summary.maxMorningWind, " mph")}; wind can make the paddle back harder than launch.`
+          detail: `${summary.windSource}: ${summary.selectedWindow?.dayName || "selected"} morning wind ${formatNumber(summary.selectedWindow?.maxWind, " mph")}; whole-weekend morning maximum ${formatNumber(summary.maxMorningWind, " mph")}.`
         },
         {
           label: "Current risk",
@@ -2574,7 +2678,7 @@ function renderCrabbing() {
           value: data.risks.confidence,
           detail: summary.alerts.length
             ? `The NWS alert check independently returned ${summarizeAlerts(summary.alerts)} for the area.`
-            : "NWS alert, wind, wave, and tide source checks returned successfully for this card."
+            : "No currently published NWS hazard overlaps the selected morning. Future alerts may still be issued; forecast coverage is shown independently."
         }
       ]
     })}
@@ -2642,7 +2746,7 @@ function renderClamming() {
 
 function getSpearfishingMetrics(item) {
   return [
-    getWaterSourceMetric(sourceConfig.tides),
+    getWaterSourceMetric(null),
     {
       label: "Physical assessment",
       value: item.physicalBlocker.label,
@@ -2953,7 +3057,7 @@ async function loadWeekendProgressively(generation) {
     appState.cache.detail = "Crabbing ready; loading spearfishing next";
     render();
   } catch (error) {
-    setActivityError("crabbing", error);
+    if (!setActivityError("crabbing", error)) return;
   }
 
   try {
@@ -2962,14 +3066,14 @@ async function loadWeekendProgressively(generation) {
     appState.cache.detail = "Spearfishing ready; loading clamming next";
     render();
   } catch (error) {
-    setActivityError("spearfishing", error);
+    if (!setActivityError("spearfishing", error)) return;
   }
 
   try {
     const clammingData = await loadClammingData();
     if (!setActivityData("clamming", clammingData)) return;
   } catch (error) {
-    setActivityError("clamming", error);
+    if (!setActivityError("clamming", error)) return;
   }
 
   if (generation !== appState.loadGeneration) return;
@@ -2977,6 +3081,7 @@ async function loadWeekendProgressively(generation) {
   const hasErrors = Object.values(appState.modeStatus).some((status) => status === "error");
   appState.status = hasErrors ? "partial" : "ready";
   appState.cache = {
+    ...appState.cache,
     status: hasErrors ? "partial" : "fresh",
     detail: hasErrors
       ? `Some checks failed; ${appState.cache.detail}`

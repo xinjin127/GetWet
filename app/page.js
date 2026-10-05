@@ -61,7 +61,7 @@ export default function Page() {
         and user-defined safety thresholds.
       </footer>
 
-      <Script src="/script.js?v=20" strategy="afterInteractive" />
+      <Script src="/script.js?v=21" strategy="afterInteractive" />
     </>
   );
 }

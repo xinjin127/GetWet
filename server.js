@@ -86,6 +86,8 @@ async function handleCachedFetch(req, res, requestUrl) {
     }
 
     const upstream = await fetch(target, {
+      signal: AbortSignal.timeout(15000),
+      redirect: "error",
       headers: {
         "accept": req.headers.accept || "*/*",
         "user-agent": "LaunchWindowPOC/1.0"

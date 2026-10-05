@@ -7,3 +7,5 @@ npm-debug.log*
 out/
 public/script.js
 public/assets/
+dist/
+wifi_health_monitor/

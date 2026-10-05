@@ -4,7 +4,9 @@
   "private": true,
   "scripts": {
     "prebuild": "node scripts/prepare-sites-public.mjs",
-    "build": "next build",
+    "build": "node scripts/build-sites.mjs",
+    "build:next": "node scripts/prepare-sites-public.mjs && next build",
+    "test": "node --test scripts/*.test.cjs",
     "dev": "next dev",
     "start": "next start"
   },
