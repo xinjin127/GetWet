@@ -213,6 +213,27 @@ test("trap prohibition and unknown health never authorize generic GO", () => {
   assert.equal(run("getCdfwCombinedStatus({inStatutorySeason:true,health:{sourceAvailable:false},whaleSafe:{status:'Crab trap prohibition',sourceAvailable:true}})"), "Automatic CDFW check incomplete");
 });
 
+test("hoop-net assessments ignore trap-only restrictions, never closures or unknown status", () => {
+  const run = crabScenario();
+  assert.equal(run('missionConfig.crabbing.method'), 'hoops');
+  run("cdfw.whaleSafe.status = 'Crab trap prohibition'; cdfw.method = missionConfig.crabbing.method; cdfw.status = getCdfwCombinedStatus(cdfw)");
+  assert.equal(run('decide().verdict'), 'GO SATURDAY MORNING');
+  for (const change of [
+    "cdfw.health.sourceAvailable = false",
+    "cdfw.health.status = 'Possible closure language found'",
+    "cdfw.health.status = 'Unrecognized new status'",
+    "cdfw.whaleSafe.status = 'Season closed'",
+    "cdfw.whaleSafe.status = 'Unparsed'",
+    "cdfw.inStatutorySeason = false"
+  ]) {
+    const isolated = crabScenario();
+    isolated("cdfw.method = 'hoops'; cdfw.whaleSafe.status = 'Crab trap prohibition'");
+    isolated(change);
+    isolated('cdfw.status = getCdfwCombinedStatus(cdfw)');
+    assert.match(isolated('decide().verdict'), /NO GO/, change);
+  }
+});
+
 test("only six aligned morning hours can produce GO", () => {
   const run = crabScenario();
   run(`var wind = Array.from({length:6}, (_,i)=>({startTime:'2026-11-07T'+String(i+6).padStart(2,'0')+':00',windSpeed:8})); var waves = wind.map(row=>({...row,waveHeight:3,swellHeight:2,swellPeriod:10}));`);

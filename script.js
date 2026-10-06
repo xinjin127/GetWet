@@ -71,11 +71,12 @@ const sourceConfig = {
 const missionConfig = {
   crabbing: {
     spot: "China Beach",
-    activity: "Paddleboard / kayak crabbing",
+    activity: "Paddleboard / kayak hoop-net crabbing",
     coords: { latitude: 37.7889, longitude: -122.4898 },
     cdfwCountyGroup: "all other counties",
     // Zone 3 spans 38 degrees 46.125 minutes N to Pigeon Point (37 degrees 11 minutes N).
     cdfwRampZone: "3",
+    method: "hoops",
     question: "Can I crab from a paddleboard or kayak at China Beach this upcoming Saturday or Sunday?",
     thresholds: {
       go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
@@ -253,7 +254,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v25";
+const CACHE_VERSION = "launch-window-v26";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -883,7 +884,8 @@ async function fetchCdfwCrabStatus(config) {
     countyGroup: config.cdfwCountyGroup,
     statutorySeason,
     inStatutorySeason,
-    status: getCdfwCombinedStatus({ inStatutorySeason, health, whaleSafe }),
+    method: config.method || "traps",
+    status: getCdfwCombinedStatus({ inStatutorySeason, health, whaleSafe, method: config.method }),
     health,
     whaleSafe
   };
@@ -1148,15 +1150,16 @@ function getLawsonsClammingBaseline() {
   };
 }
 
-function getCdfwCombinedStatus({ inStatutorySeason, health, whaleSafe }) {
+function getCdfwCombinedStatus({ inStatutorySeason, health, whaleSafe, method = "traps" }) {
   if (!inStatutorySeason) return "Closed by season date";
   if (health.status === "Possible closure language found") return "Possible health closure";
   if (whaleSafe.status === "Season closed") return "CDFW recreational season closed";
   if (!health.sourceAvailable
     || !whaleSafe.sourceAvailable
-    || health.status === "No matching Dungeness status found"
-    || whaleSafe.status === "Unparsed") return "Automatic CDFW check incomplete";
-  if (whaleSafe.status === "Crab trap prohibition") return "Trap prohibition";
+    || health.status !== "No toxin closure found"
+    || !["Open to all permitted methods", "Crab trap prohibition"].includes(whaleSafe.status)
+    || !["traps", "hoops"].includes(method)) return "Automatic CDFW check incomplete";
+  if (whaleSafe.status === "Crab trap prohibition" && method === "traps") return "Trap prohibition";
   return "Season appears open, subject to method and day-of checks";
 }
 
@@ -2407,6 +2410,7 @@ function renderCdfwCrabStatus(status) {
         <strong>${escapeHtml(status.status)}</strong>
       </div>
       <p>${escapeHtml(status.location)} · RAMP Fishing Zone ${escapeHtml(status.rampZone)}</p>
+      <p>Gear: Hoop nets. ${status.method === "hoops" && status.whaleSafe.status === "Crab trap prohibition" ? "The whale-entanglement trap restriction does not prohibit hoop nets; season and health restrictions still apply." : ""}</p>
       <p>${escapeHtml(status.statutorySeason.label)}</p>
       <p>${escapeHtml(status.health.detail)}</p>
       <p>${escapeHtml(status.whaleSafe.detail)}</p>
