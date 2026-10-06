@@ -31,6 +31,7 @@ function crabScenario() {
     var alerts = [];
     var daylight = [7,8].map(day => ({day:'2026-11-0'+day,sunrise:'2026-11-0'+day+'T06:00',sunset:'2026-11-0'+day+'T17:00'}));
     fetchDaylight = async () => daylight;
+    fetchCurrentPredictions = async () => [{time:'2026-11-07T09:00',speedKnots:0,type:'slack'}];
     var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw, daylight});
   `);
   return run;
@@ -74,7 +75,7 @@ test("a partial forecast cannot yield GO, even with calm maxima", () => {
 });
 
 test("each failed source preserves other checks and cannot authorize GO", async () => {
-  for (const failed of ['fetchTides', 'fetchNwsWeather', 'fetchMarineForecast', 'fetchAlerts', 'fetchDaylight']) {
+  for (const failed of ['fetchTides', 'fetchNwsWeather', 'fetchMarineForecast', 'fetchAlerts', 'fetchDaylight', 'fetchCurrentPredictions']) {
     const run = crabScenario();
     run(`fetchTides = async () => [{t:'2026-11-07 09:00',v:'1.2'}];
       fetchNwsWeather = async () => weather;
@@ -115,6 +116,28 @@ test("NWS response errors are not interpreted as zero hazards", async () => {
   const run = app();
   run('fetchJson = async () => ({features: []})');
   assert.equal((await run('fetchAlerts(missionConfig.crabbing.coords)')).length, 0);
+});
+
+test("NOAA current predictions preserve knots and reject missing or mismatched records", async () => {
+  const run = app();
+  run(`var cp = [7,8].flatMap(day => ['ebb','slack','flood'].map((Type,i) => ({
+    Type, Time:'2026-11-0'+day+' '+String(i+6).padStart(2,'0')+':00',
+    Velocity_Major: i-1, Bin:'1', Depth:'31'
+  })));
+  var units = 'feet, knots';
+  fetchJson = async () => ({current_predictions:{units,cp}});`);
+  const data = await run('fetchCurrentPredictions()');
+  assert.equal(data.length, 6);
+  assert.equal(data[0].speedKnots, 1);
+  assert.equal(data[1].speedKnots, 0);
+  run("cp[0].Velocity_Major = null");
+  await assert.rejects(run('fetchCurrentPredictions()'), /could not be verified/);
+  run("cp[0].Velocity_Major = -1; cp[0].Depth = '50'");
+  await assert.rejects(run('fetchCurrentPredictions()'), /could not be verified/);
+  run("cp[0].Depth = '31'; units = 'meters, cm/s'");
+  await assert.rejects(run('fetchCurrentPredictions()'), /invalid units/);
+  run("units = 'feet, knots'; cp=cp.slice(0,3)");
+  await assert.rejects(run('fetchCurrentPredictions()'), /both weekend days/);
 });
 
 test("empty successful feeds also withhold GO without discarding measurements", async () => {

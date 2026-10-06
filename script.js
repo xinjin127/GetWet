@@ -1,4 +1,11 @@
 const sourceConfig = {
+  currents: {
+    name: "NOAA Baker Beach (South Bay), 0.3 nmi. NW of",
+    station: "PCT0256",
+    bin: "1",
+    depthFeet: 31,
+    link: "https://tidesandcurrents.noaa.gov/noaacurrents/predictions.html?id=PCT0256_1"
+  },
   tides: {
     name: "NOAA CO-OPS San Francisco tide predictions",
     url: "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter",
@@ -254,7 +261,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v26";
+const CACHE_VERSION = "launch-window-v27";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -436,13 +443,14 @@ async function loadCrabbingData() {
       fetchNwsWeather(crabbing.coords),
       fetchMarineForecast(crabbing.coords),
       fetchAlerts(crabbing.coords),
-      fetchDaylight(crabbing.coords)
+      fetchDaylight(crabbing.coords),
+      fetchCurrentPredictions()
     ]),
     fetchCdfwCrabStatus(crabbing)
   ]);
-  const defaults = [[], { periods: [], sourceName: sourceConfig.weather.name }, [], [], []];
-  const [tides, weather, marine, alerts, daylight] = feeds.map((feed, index) => feed.status === "fulfilled" ? feed.value : defaults[index]);
-  const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check", "Sunrise and sunset"];
+  const defaults = [[], { periods: [], sourceName: sourceConfig.weather.name }, [], [], [], []];
+  const [tides, weather, marine, alerts, daylight, currents] = feeds.map((feed, index) => feed.status === "fulfilled" ? feed.value : defaults[index]);
+  const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check", "Sunrise and sunset", "NOAA current predictions"];
   const sourceChecks = feeds.map((feed, index) => ({
     name: names[index],
     available: feed.status === "fulfilled" && (index === 3 || (index === 1 ? weather.periods.length : feed.value.length) > 0),
@@ -456,8 +464,50 @@ async function loadCrabbingData() {
     alerts,
     cdfwCrabStatus,
     sourceChecks,
-    daylight
+    daylight,
+    currents
   });
+}
+
+async function fetchCurrentPredictions() {
+  const weekend = getSelectedWeekend();
+  const params = new URLSearchParams({
+    product: "currents_predictions", application: "LaunchWindow",
+    station: sourceConfig.currents.station, bin: sourceConfig.currents.bin,
+    begin_date: toIsoDate(weekend.saturday).replaceAll("-", ""),
+    end_date: toIsoDate(weekend.sunday).replaceAll("-", ""),
+    time_zone: "lst_ldt", units: "english", interval: "max_slack", format: "json"
+  });
+  const data = await fetchJson(`${sourceConfig.tides.url}?${params}`);
+  const rows = data.current_predictions?.cp;
+  if (data.current_predictions?.units !== "feet, knots" || !Array.isArray(rows) || !rows.length) {
+    throw new Error("NOAA current predictions unavailable or invalid units");
+  }
+  const predictions = rows.map((row) => {
+    const speed = finiteValue(row.Velocity_Major);
+    const time = String(row.Time || "").replace(" ", "T");
+    if (speed === null || !Number.isFinite(+new Date(time)) || !["ebb", "flood", "slack"].includes(row.Type)
+      || String(row.Bin) !== sourceConfig.currents.bin || Number(row.Depth) !== sourceConfig.currents.depthFeet) {
+      throw new Error("NOAA current prediction record could not be verified");
+    }
+    return { time, speedKnots: Math.abs(speed), type: row.Type };
+  });
+  for (const date of [weekend.saturday, weekend.sunday]) {
+    const types = new Set(predictions.filter((row) => row.time.startsWith(toIsoDate(date))).map((row) => row.type));
+    if (!["ebb", "flood", "slack"].every((type) => types.has(type))) throw new Error("NOAA current predictions do not cover both weekend days");
+  }
+  return predictions;
+}
+
+function describeCrabbingCurrents(currents, selectedWindow) {
+  const date = selectedWindow ? toIsoDate(new Date(selectedWindow.date)) : "";
+  const rows = currents.filter((row) => row.time.startsWith(date));
+  const context = `${sourceConfig.currents.name}, station ${sourceConfig.currents.station}, bin ${sourceConfig.currents.bin}, ${sourceConfig.currents.depthFeet} ft depth. This is an offshore tidal-current reference, not surface flow at China Beach; route-specific return risk is not graded.`;
+  if (!rows.length) return `No verified current predictions for this day. ${context}`;
+  const ebb = maxNumber(rows.filter((row) => row.type === "ebb").map((row) => row.speedKnots));
+  const flood = maxNumber(rows.filter((row) => row.type === "flood").map((row) => row.speedKnots));
+  const slack = rows.filter((row) => row.type === "slack").map((row) => formatTimeLabel(row.time)).join(", ");
+  return `${selectedWindow.dayName} daily peak ebb ${formatNumber(ebb, " kn")}; peak flood ${formatNumber(flood, " kn")}. Slack predictions: ${slack} Pacific. ${context}`;
 }
 
 async function loadSpearfishingData() {
@@ -1277,7 +1327,7 @@ function formatShortDateTime(dateValue) {
   });
 }
 
-function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus, sourceChecks = [], daylight = [] }) {
+function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus, sourceChecks = [], daylight = [], currents = [] }) {
   const weatherMorning = morningHours(weather.periods);
   const marineMorning = morningHours(marine);
   const allWeather = weather.periods;
@@ -1345,6 +1395,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     returnBy,
     sourceSummary: {
       sourceChecks,
+      currents,
       tideEvents: tides,
       waveSeries: buildWaveSeries(allMarine),
       windSeries: buildWindSeries(allWeather),
@@ -1363,8 +1414,8 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     risks: {
       entryExit: selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
       windDrift: selectedWindow?.maxWind !== null && selectedWindow?.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
-      current: "Current not measured",
-      currentDetail: "NOAA tide height does not measure tidal-current speed. This screen grades wind, waves and swell only; Golden Gate return currents have not been evaluated.",
+      current: currents.length ? "Nearby predictions available; route risk unassessed" : "Current predictions unavailable",
+      currentDetail: describeCrabbingCurrents(currents, selectedWindow),
       confidence: failedChecks.length ? "Required checks incomplete" : !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
     },
     reasons: buildCrabbingReasons({
@@ -2385,6 +2436,7 @@ function renderSourceLinks() {
       <p class="cache-note">${escapeHtml(appState.cache.detail || "Server cache enabled")}</p>
       <a href="${sourceConfig.nws.link}" target="_blank" rel="noreferrer">${sourceConfig.nws.name}</a>
       <a href="${sourceConfig.tides.link}" target="_blank" rel="noreferrer">${sourceConfig.tides.name}</a>
+      <a href="${sourceConfig.currents.link}" target="_blank" rel="noreferrer">${sourceConfig.currents.name} current predictions</a>
       <a href="${sourceConfig.lawsonsTides.link}" target="_blank" rel="noreferrer">${sourceConfig.lawsonsTides.name}</a>
       <a href="${sourceConfig.ndbc.link}" target="_blank" rel="noreferrer">${sourceConfig.ndbc.name}</a>
       <a href="${sourceConfig.marine.link}" target="_blank" rel="noreferrer">${sourceConfig.marine.name}</a>
@@ -2397,7 +2449,7 @@ function getWaterSourceMetric(tideSource) {
   return {
     label: "Water data source",
     value: tideSource ? `Marine model / NOAA ${tideSource.station} tides` : "Open-Meteo marine model",
-    detail: `Waves are Open-Meteo grid forecasts, not live buoy readings. ${tideSource ? `Hourly tides use ${tideSource.name}.` : "No local tide predictions are used for this beach."} No buoy observations or tidal-current predictions are used in this assessment.`
+    detail: `Waves are Open-Meteo grid forecasts, not live buoy readings. ${tideSource ? `Hourly tides use ${tideSource.name}.` : "No local tide predictions are used for this beach."} No buoy observations are used; current references, where available, are reported separately.`
   };
 }
 
