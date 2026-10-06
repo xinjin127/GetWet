@@ -11,6 +11,89 @@ function app() {
   return (code) => vm.runInContext(code, context);
 }
 
+// Synthetic boundary cases are isolated to tests; the application uses live sources.
+function crabScenario() {
+  const run = app();
+  run(`
+    var weather = { sourceName: 'Test wind', periods: [] };
+    var marine = [];
+    for (const day of [7, 8]) for (let hour = 6; hour <= 11; hour++) {
+      const startTime = '2026-11-' + String(day).padStart(2, '0') + 'T' + String(hour).padStart(2, '0') + ':00';
+      weather.periods.push({ startTime, windSpeed: 8 });
+      marine.push({ startTime, waveHeight: 3, swellHeight: 2, swellPeriod: 10, wavePeriod: 10 });
+    }
+    var cdfw = {
+      inStatutorySeason: true, status: 'Season appears open, subject to method and day-of checks',
+      rampZone: '4', statutorySeason: { label: 'Test season' },
+      health: { status: 'No toxin closure found', sourceAvailable: true, detail: 'Test health' },
+      whaleSafe: { status: 'Open to all permitted methods', sourceAvailable: true, detail: 'Test status' }
+    };
+    var alerts = [];
+    var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw});
+  `);
+  return run;
+}
+
+test("a GO Saturday never cites Sunday's waves as its blocker", () => {
+  const run = crabScenario();
+  run("marine.slice(6).forEach(hour => hour.waveHeight = 12)");
+  assert.equal(run("decide().verdict"), "GO SATURDAY MORNING");
+  assert.equal(run("decide().headlineReason"), "WAVES, WIND AND SWELL WITHIN GO LIMITS");
+});
+
+test("a good Sunday survives Saturday weather and an overlapping Saturday warning", () => {
+  const run = crabScenario();
+  run(`marine.slice(0, 6).forEach(hour => hour.waveHeight = 12);
+    alerts = [{ event: 'Gale Warning', onset: '2026-11-07T06:00:00-08:00', expires: '2026-11-07T12:00:00-08:00' }];`);
+  assert.equal(run("decide().verdict"), "GO SUNDAY MORNING");
+  assert.equal(run("decide().headlineReason"), "WAVES, WIND AND SWELL WITHIN GO LIMITS");
+});
+
+test("swell height and period must exceed their paired limits at the same hour", () => {
+  const run = crabScenario();
+  run(`marine.forEach((hour, i) => { hour.waveHeight = 5; hour.swellHeight = i % 2 ? 1 : 4.5; hour.swellPeriod = i % 2 ? 18 : 10; });`);
+  assert.equal(run("decide().verdict"), "GO SATURDAY MORNING");
+  run("marine[0].swellPeriod = 18; marine[6].swellPeriod = 18");
+  assert.match(run("decide().verdict"), /NO GO/);
+});
+
+test("full assessment honors all legal blockers even in calm conditions", () => {
+  for (const status of ['Trap prohibition', 'Possible health closure', 'CDFW recreational season closed', 'Automatic CDFW check incomplete']) {
+    const run = crabScenario();
+    run(`cdfw.status = ${JSON.stringify(status)}`);
+    assert.match(run("decide().verdict"), /NO GO/);
+  }
+});
+
+test("a partial forecast cannot yield GO, even with calm maxima", () => {
+  const run = crabScenario();
+  run("marine = [marine[0], marine[6]]");
+  assert.equal(run("decide().verdict"), "PENDING FORECAST");
+});
+
+test("full decision matrix agrees with the configured wave and wind boundaries", () => {
+  const run = crabScenario();
+  for (const wave of [0, 3, 5, 5.01, 6, 6.01, 12]) {
+    for (const wind of [0, 8, 12, 12.01, 14, 14.01, 25]) {
+      run(`marine.forEach(hour => hour.waveHeight = ${wave}); weather.periods.forEach(hour => hour.windSpeed = ${wind});`);
+      const expected = wave <= 5 && wind <= 12 ? "GO SATURDAY MORNING"
+        : wave <= 6 && wind <= 14 ? "MAYBE SATURDAY MORNING" : "NO GO THIS WEEKEND";
+      assert.equal(run("decide().verdict"), expected, `wave=${wave}, wind=${wind}`);
+    }
+  }
+});
+
+test("every weekend of the 2026-27 season respects the official calendar boundaries", () => {
+  const run = crabScenario();
+  for (let day = new Date(2026, 9, 3); day <= new Date(2027, 7, 7); day.setDate(day.getDate() + 7)) {
+    run(`getSelectedWeekend = () => ({saturday:new Date(${day.getFullYear()},${day.getMonth()},${day.getDate()}), sunday:new Date(${day.getFullYear()},${day.getMonth()},${day.getDate()+1})})`);
+    const actual = run("buildCrabbingMorningWindows({weather:[],marine:[],config:missionConfig.crabbing}).map(window => window.legalDay)");
+    const sunday = new Date(day); sunday.setDate(sunday.getDate() + 1);
+    const expected = [day, sunday].map(date => date >= new Date(2026, 10, 7) && date <= new Date(2027, 5, 30, 23, 59, 59));
+    assert.deepEqual(Array.from(actual), expected, day.toISOString());
+  }
+});
+
 test("2026 opener is November 7, including October previews", () => {
   const run = app();
   for (const month of [9, 10]) {

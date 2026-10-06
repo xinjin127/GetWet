@@ -252,7 +252,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v21";
+const CACHE_VERSION = "launch-window-v22";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -1350,6 +1350,7 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
       const maxWave = maxNumber(marineHours.map((hour) => hour.waveHeight));
       const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
       const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
+      const swellPairs = marineHours.map((hour) => ({ height: hour.swellHeight, period: hour.swellPeriod }));
       const complete = hasCompleteMorning(weatherHours, marineHours);
       const windowAlerts = alertsForMorning(alerts, date);
       const season = getCdfwDungenessSeasonWindow(date, config.cdfwCountyGroup);
@@ -1359,6 +1360,7 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
         maxWave,
         maxSwellPeriod,
         maxSwellHeight,
+        swellPairs,
         thresholds: config.thresholds
       });
 
@@ -1369,6 +1371,7 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
         maxWave,
         maxSwellPeriod,
         maxSwellHeight,
+        swellPairs,
         complete,
         legalDay,
         alerts: windowAlerts,
@@ -1394,17 +1397,17 @@ function morningHoursForDate(hours, date) {
   });
 }
 
-function gradeCrabbingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
+function gradeCrabbingWindow({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, swellPairs, thresholds }) {
   if (![maxWind, maxWave, maxSwellPeriod, maxSwellHeight].every(Number.isFinite)) return "no-go";
-  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.go })) return "go";
-  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds: thresholds.maybe })) return "maybe";
+  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, swellPairs, thresholds: thresholds.go })) return "go";
+  if (passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, swellPairs, thresholds: thresholds.maybe })) return "maybe";
   return "no-go";
 }
 
-function passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, thresholds }) {
-  const pairedSwellBlock = Number.isFinite(maxSwellHeight)
-    && maxSwellHeight > thresholds.maxSwellHeightFeet
-    && maxSwellPeriod > thresholds.maxSwellPeriodSeconds;
+function passesCrabbingThresholds({ maxWind, maxWave, maxSwellPeriod, maxSwellHeight, swellPairs, thresholds }) {
+  const pairs = swellPairs || [{ height: maxSwellHeight, period: maxSwellPeriod }];
+  const pairedSwellBlock = pairs.some(({ height, period }) => Number.isFinite(height)
+    && height > thresholds.maxSwellHeightFeet && period > thresholds.maxSwellPeriodSeconds);
   return maxWave <= thresholds.maxWaveFeet
     && maxWind <= thresholds.maxWindMph
     && !pairedSwellBlock;
@@ -1421,7 +1424,7 @@ function cdfwAllowsCrabbing(cdfwCrabStatus) {
     && cdfwCrabStatus.status === "Season appears open, subject to method and day-of checks";
 }
 
-function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, maxMorningSwellPeriod, maxMorningWind, selectedWindow }) {
+function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, selectedWindow }) {
   if (!cdfwCrabStatus.inStatutorySeason) return "CDFW SEASON CLOSED";
   if (cdfwCrabStatus.status === "CDFW recreational season closed") return "CDFW RECREATIONAL SEASON CLOSED";
   if (cdfwCrabStatus.status === "Possible health closure") return "POSSIBLE CDFW HEALTH CLOSURE";
@@ -1429,14 +1432,12 @@ function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, maxMorningWave, max
   if (cdfwCrabStatus.status === "Trap prohibition") return "CRAB TRAP PROHIBITION";
   if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
   if (!selectedWindow?.complete) return "FORECAST INCOMPLETE FOR 6-11AM";
-  if (selectedWindow?.maxWave !== null && selectedWindow?.maxWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
-  if (selectedWindow?.maxWind !== null && selectedWindow?.maxWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
-  if (selectedWindow?.maxSwellHeight > missionConfig.crabbing.thresholds.maybe.maxSwellHeightFeet
-    && selectedWindow?.maxSwellPeriod > missionConfig.crabbing.thresholds.maybe.maxSwellPeriodSeconds) return "LONG-PERIOD SWELL WITH SIZE";
-  if (maxMorningWave !== null && maxMorningWave > missionConfig.crabbing.thresholds.maybe.maxWaveFeet) return "WAVES ABOVE 6 FT";
-  if (maxMorningSwellPeriod !== null && maxMorningSwellPeriod > 16) return "LONG-PERIOD SWELL";
-  if (maxMorningWind !== null && maxMorningWind > missionConfig.crabbing.thresholds.maybe.maxWindMph) return "RETURN WIND RISK";
-  return selectedWindow?.status === "go" ? "WAVES, WIND AND SWELL WITHIN GO LIMITS" : "MARGINAL WAVES, WIND OR SWELL";
+  const limits = missionConfig.crabbing.thresholds.go;
+  if (selectedWindow.maxWave > limits.maxWaveFeet) return `WAVES ${formatNumber(selectedWindow.maxWave, " FT")} ABOVE ${limits.maxWaveFeet} FT GO LIMIT`;
+  if (selectedWindow.maxWind > limits.maxWindMph) return `WIND ${formatNumber(selectedWindow.maxWind, " MPH")} ABOVE ${limits.maxWindMph} MPH GO LIMIT`;
+  const swell = selectedWindow.swellPairs?.find(({ height, period }) => height > limits.maxSwellHeightFeet && period > limits.maxSwellPeriodSeconds);
+  if (swell) return `SWELL ${formatNumber(swell.height, " FT")} AT ${formatNumber(swell.period, " SEC")}`;
+  return "WAVES, WIND AND SWELL WITHIN GO LIMITS";
 }
 
 function summarizeAlerts(alerts) {
