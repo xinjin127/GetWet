@@ -261,7 +261,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v28";
+const CACHE_VERSION = "launch-window-v29";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -659,16 +659,38 @@ function writeCachedData(cacheKey, data) {
     || !data.crabbing?.sourceSummary?.cdfwCrabStatus?.health?.sourceAvailable
     || !data.clamming?.sourceSummary?.clammingStatus?.cdph?.sourceAvailable) return;
   try {
+    pruneBrowserCache(cacheKey);
     localStorage.setItem(cacheKey, JSON.stringify({
       savedAt: new Date(appState.cache.oldestSourceAt || Date.now()).toISOString(),
       data
     }));
-  } catch {
+  } catch (error) {
     appState.cache = {
+      ...appState.cache,
       status: "fresh",
-      detail: "Fresh checks loaded; browser cache storage is unavailable"
+      detail: `Fresh checks loaded; browser cache ${error.name === "QuotaExceededError" ? "storage quota exceeded" : "storage unavailable"}`
     };
   }
+}
+
+function pruneBrowserCache(currentKey) {
+  const entries = [];
+  for (let index = 0; index < localStorage.length; index++) {
+    const key = localStorage.key(index);
+    if (/^launch-window-v\d+:/.test(key || "") && key !== currentKey) entries.push(key);
+  }
+  const retained = [];
+  for (const key of entries) {
+    let savedAt = NaN;
+    try { savedAt = Date.parse(JSON.parse(localStorage.getItem(key))?.savedAt); } catch {}
+    const age = Date.now() - savedAt;
+    if (!key.startsWith(`${CACHE_VERSION}:`) || !Number.isFinite(age) || age < 0 || age > CACHE_TTL_MS) {
+      localStorage.removeItem(key);
+    } else retained.push({key, savedAt});
+  }
+  retained.sort((a,b) => b.savedAt - a.savedAt);
+  // Keep the selected weekend plus the four other preview weekends at most.
+  for (const entry of retained.slice(MAX_WEEKEND_OFFSET)) localStorage.removeItem(entry.key);
 }
 
 function reviveCachedData(data) {
