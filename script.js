@@ -393,8 +393,11 @@ function recordServerCacheHeader(cacheHeader) {
 function summarizeServerCacheStats() {
   const { requests, hits, misses } = appState.cache;
   if (!requests) {
-    appState.cache.status = "direct";
-    appState.cache.detail = "Direct browser fetches; start with server.js for server-side caching";
+    const serverExpected = window.location.protocol !== "file:" && window.location.hostname !== "xinjin127.github.io";
+    appState.cache.status = serverExpected ? "unavailable" : "direct";
+    appState.cache.detail = serverExpected
+      ? "No successful server-cache responses received; some source requests failed"
+      : "Public sources loaded directly; browser caching enabled";
     return;
   }
   appState.cache.status = hits ? "cached" : "fresh";
