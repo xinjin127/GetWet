@@ -84,3 +84,15 @@ test('returning to a cached weekend invalidates outstanding live work', async ()
   assert.equal(run('appState.data.crabbing.tag'), 'cached');
   assert.equal(run('calls.join()'), 'crabbing');
 });
+
+test('visible stale assessments refresh, hidden or recently loaded pages do not', () => {
+  const run = harness();
+  run("var refreshes=[]; reloadSelectedWeekend = options => refreshes.push(options); appState.lastLoadAt=Date.now()-6*60000");
+  run('refreshAgedAssessment(false)');
+  assert.equal(run('refreshes.length'),0);
+  run('refreshAgedAssessment(true)');
+  assert.equal(run('refreshes.length'),1);
+  assert.equal(run('refreshes[0].forceRefresh'),true);
+  run('appState.lastLoadAt=Date.now(); refreshAgedAssessment(true)');
+  assert.equal(run('refreshes.length'),1);
+});

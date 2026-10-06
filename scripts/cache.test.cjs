@@ -45,3 +45,27 @@ test("server cache reuses success, never stores upstream errors, and rejects unr
     delete globalThis.launchWindowFetchCache;
   }
 });
+
+test("hazard and legal feeds expire sooner than forecast data", async () => {
+  const source = fs.readFileSync(require.resolve('../app/api/fetch/route.js'),'utf8') + '\n// freshness test';
+  const cache = new Map();
+  globalThis.launchWindowFetchCache = cache;
+  const {GET} = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const original = global.fetch;
+  global.fetch = async () => new Response('updated');
+  try {
+    for (const [url,minutes,expected] of [
+      ['https://api.weather.gov/alerts/active?point=test',4,'HIT'],
+      ['https://api.weather.gov/alerts/active?point=test',6,'MISS'],
+      ['https://wildlife.ca.gov/Fishing/Ocean/Health-Advisories',16,'MISS'],
+      ['https://api.open-meteo.com/v1/forecast?test=ttl',120,'HIT']
+    ]) {
+      cache.set(url,{savedAt:new Date(Date.now()-minutes*60000).toISOString(),body:new TextEncoder().encode('cached').buffer,status:200,contentType:'text/plain'});
+      const response = await GET(new Request('https://app.test/api/fetch?url='+encodeURIComponent(url)));
+      assert.equal(response.headers.get('x-launch-cache'),expected,`${url}: ${minutes} minutes`);
+    }
+  } finally {
+    global.fetch=original;
+    delete globalThis.launchWindowFetchCache;
+  }
+});

@@ -1,5 +1,11 @@
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 250;
+function cacheTtlFor(target) {
+  const url = new URL(target);
+  if (url.hostname === "api.weather.gov" && url.pathname.startsWith("/alerts")) return 5 * 60 * 1000;
+  if (["wildlife.ca.gov", "www.cdph.ca.gov"].includes(url.hostname)) return 15 * 60 * 1000;
+  return CACHE_TTL_MS;
+}
 const ALLOWED_HOSTS = new Set([
   "api.weather.gov",
   "api.tidesandcurrents.noaa.gov",
@@ -54,7 +60,7 @@ export async function GET(request) {
     const cached = cache.get(key);
     if (cached) {
       const age = Date.now() - new Date(cached.savedAt).getTime();
-      if (Number.isFinite(age) && age >= 0 && age <= CACHE_TTL_MS) {
+      if (Number.isFinite(age) && age >= 0 && age <= cacheTtlFor(target)) {
         return responseFromPayload(cached, "HIT");
       }
       cache.delete(key);

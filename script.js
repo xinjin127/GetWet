@@ -239,6 +239,7 @@ const appState = {
   weekendOffset: 0,
   spearfishingIndex: 0,
   loadGeneration: 0,
+  lastLoadAt: 0,
   status: "loading",
   error: "",
   data: null,
@@ -261,8 +262,8 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v29";
-const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const CACHE_VERSION = "launch-window-v30";
+const CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
 
@@ -3150,6 +3151,7 @@ function renderWeekendStepper() {
 }
 
 function reloadSelectedWeekend({ forceRefresh = false } = {}) {
+  appState.lastLoadAt = Date.now();
   const generation = appState.loadGeneration + 1;
   appState.loadGeneration = generation;
   appState.status = "loading";
@@ -3180,6 +3182,11 @@ function reloadSelectedWeekend({ forceRefresh = false } = {}) {
   render();
 
   loadWeekendProgressively(generation);
+}
+
+function refreshAgedAssessment(isVisible) {
+  if (!isVisible || Date.now() - appState.lastLoadAt < CACHE_TTL_MS) return;
+  reloadSelectedWeekend({ forceRefresh: true });
 }
 
 async function loadWeekendProgressively(generation) {
@@ -3266,3 +3273,5 @@ document.querySelector("#mode-content").addEventListener("click", (event) => {
 
 render();
 reloadSelectedWeekend();
+window.setInterval(() => refreshAgedAssessment(document.visibilityState === "visible"), CACHE_TTL_MS);
+document.addEventListener("visibilitychange", () => refreshAgedAssessment(document.visibilityState === "visible"));

@@ -8,6 +8,12 @@ const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 5173);
 const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || 3 * 60 * 60 * 1000);
 const CACHE_DIR = path.join(ROOT, ".cache", "http");
+function cacheTtlFor(target) {
+  const url = new URL(target);
+  if (url.hostname === "api.weather.gov" && url.pathname.startsWith("/alerts")) return Math.min(CACHE_TTL_MS, 5 * 60 * 1000);
+  if (["wildlife.ca.gov", "www.cdph.ca.gov"].includes(url.hostname)) return Math.min(CACHE_TTL_MS, 15 * 60 * 1000);
+  return CACHE_TTL_MS;
+}
 const ALLOWED_HOSTS = new Set([
   "api.weather.gov",
   "api.tidesandcurrents.noaa.gov",
@@ -44,7 +50,7 @@ async function readCache(url) {
     const raw = await fs.readFile(cachePathFor(url), "utf8");
     const cached = JSON.parse(raw);
     const age = Date.now() - new Date(cached.savedAt).getTime();
-    if (!Number.isFinite(age) || age > CACHE_TTL_MS) return null;
+    if (!Number.isFinite(age) || age < 0 || age > cacheTtlFor(url)) return null;
     return cached;
   } catch {
     return null;
