@@ -74,7 +74,8 @@ const missionConfig = {
     activity: "Paddleboard / kayak crabbing",
     coords: { latitude: 37.7889, longitude: -122.4898 },
     cdfwCountyGroup: "all other counties",
-    cdfwRampZone: "4",
+    // Zone 3 spans 38 degrees 46.125 minutes N to Pigeon Point (37 degrees 11 minutes N).
+    cdfwRampZone: "3",
     question: "Can I crab from a paddleboard or kayak at China Beach this upcoming Saturday or Sunday?",
     thresholds: {
       go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
@@ -252,7 +253,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v24";
+const CACHE_VERSION = "launch-window-v25";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -934,18 +935,17 @@ function parseCdfwHealthStatus(html) {
 
 function parseCdfwWhaleSafeStatus(html, rampZone) {
   const text = normalizeText(html);
-  const recreationalSection = extractBetween(text, "Recreational Fishery:", "Risk Assessment and Mitigation Program");
-  const entries = [...recreationalSection.matchAll(/Fishing Zones?\s+([1-6](?:\s*(?:-|,|and|&)\s*[1-6])*)\s*:\s*([\s\S]*?)(?=Fishing Zones?\s+[1-6]|$)/gi)];
-  const entry = entries.find((match) => {
-    const zones = match[1].replace(/([1-6])\s*-\s*([1-6])/g, (_, a, b) => Array.from({ length: Number(b) - Number(a) + 1 }, (_, i) => Number(a) + i).join(","));
-    return (zones.match(/[1-6]/g) || []).includes(String(rampZone));
-  });
-  const zoneText = entry?.[2] || (!/Fishing Zones?/i.test(recreationalSection) && /Season (?:is )?closed/i.test(recreationalSection) ? "Season closed" : "");
-  if (/Season (?:is )?closed/i.test(zoneText)) {
+  const recreationalSection = (text.split(/Recreational Fishery\s*:/i)[1] || "")
+    .split(/Risk Assessments|Risk Assessment and Mitigation Program|Commercial Fishery\s*:/i)[0].trim();
+  const entries = [...recreationalSection.matchAll(/Fishing Zones?\s+([^:]+):\s*([\s\S]*?)(?=Fishing Zones?\s+|$)/gi)];
+  const matching = entries.filter((match) => parseCdfwZoneList(match[1])?.includes(String(rampZone)));
+  const statuses = matching.map((entry) => entry[2].trim());
+  if (!entries.length && /^Season (?:is )?closed[.\s]*$/i.test(recreationalSection)) statuses.push("Season closed");
+  if (statuses.some((status) => /^Season (?:is )?closed\b/i.test(status))) {
     return { status: "Season closed", detail: "CDFW's current recreational fishery status says the season is closed. An upcoming statutory opener is not confirmation that gear restrictions have been lifted.", sourceAvailable: true };
   }
 
-  if (/Crab Trap Prohibition/i.test(zoneText)) {
+  if (statuses.some((status) => /^Crab Trap Prohibition\b/i.test(status))) {
     return {
       status: "Crab trap prohibition",
       detail: `CDFW Whale Safe Fisheries lists a recreational crab trap prohibition affecting Fishing Zone ${rampZone}.`,
@@ -953,7 +953,7 @@ function parseCdfwWhaleSafeStatus(html, rampZone) {
     };
   }
 
-  if (/Open to all permitted methods/i.test(zoneText)) {
+  if (statuses.length && statuses.every((status) => /^Open to all permitted methods[.\s]*(?:\(?Fleet Advisory\)?[.\s]*)?$/i.test(status))) {
     return {
       status: "Open to all permitted methods",
       detail: `CDFW Whale Safe Fisheries indicates Fishing Zone ${rampZone} is open to all permitted recreational crab methods.`,
@@ -966,6 +966,21 @@ function parseCdfwWhaleSafeStatus(html, rampZone) {
     detail: `CDFW Whale Safe Fisheries was reachable, but Zone ${rampZone} trap status could not be parsed confidently.`,
     sourceAvailable: true
   };
+}
+
+function parseCdfwZoneList(value) {
+  const normalized = value.trim().replace(/[\u2013\u2014]/g, "-").replace(/,?\s*(?:and|&)\s*/gi, ",");
+  const parts = normalized.split(",").map((part) => part.trim());
+  const zones = [];
+  for (const part of parts) {
+    const match = /^([1-6])(?:\s*-\s*([1-6]))?$/.exec(part);
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2] || match[1]);
+    if (end < start) return null;
+    for (let zone = start; zone <= end; zone++) zones.push(String(zone));
+  }
+  return zones;
 }
 
 function parseCdfwClamRules(html) {

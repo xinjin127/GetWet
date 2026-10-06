@@ -178,6 +178,35 @@ test("CDFW zones cannot borrow neighboring open status", () => {
   assert.equal(run(`parseCdfwWhaleSafeStatus('Recreational Fishery: Season is closed Risk Assessment and Mitigation Program Fishing Zone 4: Open to all permitted methods', '4').status`), "Season closed");
 });
 
+test("China Beach checks CDFW Zone 3, not the zone south of Pigeon Point", () => {
+  const run = app();
+  assert.equal(run('missionConfig.crabbing.cdfwRampZone'), '3');
+  assert.ok(run('missionConfig.crabbing.coords.latitude > 37 + 11/60 && missionConfig.crabbing.coords.latitude < 38 + 46.125/60'));
+  assert.equal(run(`parseCdfwWhaleSafeStatus('Recreational Fishery: Fishing Zone 3: Crab Trap Prohibition Fishing Zone 4: Open to all permitted methods Risk Assessments',missionConfig.crabbing.cdfwRampZone).status`), 'Crab trap prohibition');
+});
+
+test("CDFW zone lists accept official punctuation without expanding unrelated zones", () => {
+  const run = app();
+  for (const list of ['1, 2, and 3', '1, 2 and 3', '1-3', '1\u20133', '1 & 2 & 3']) {
+    const page = `Recreational Fishery: Fishing Zones ${list}: Open to all permitted methods Risk Assessments`;
+    for (const zone of ['1','2','3','4','5','6']) {
+      assert.equal(run(`parseCdfwWhaleSafeStatus(${JSON.stringify(page)},'${zone}').status`), Number(zone) <= 3 ? 'Open to all permitted methods' : 'Unparsed', `${list} zone ${zone}`);
+    }
+  }
+});
+
+test("negated, conditional, conflicting and historical opening text never authorizes GO", () => {
+  const run = app();
+  for (const status of ['Not open to all permitted methods', 'Open to all permitted methods effective November 15', 'Open to all permitted methods except traps', 'Previously open to all permitted methods']) {
+    assert.equal(run(`parseCdfwWhaleSafeStatus(${JSON.stringify('Recreational Fishery: Fishing Zone 3: '+status+' Risk Assessments')},'3').status`), 'Unparsed');
+  }
+  assert.equal(run(`parseCdfwWhaleSafeStatus('Recreational Fishery: Fishing Zone 3: Open to all permitted methods Fishing Zone 3: Crab Trap Prohibition Risk Assessments','3').status`), 'Crab trap prohibition');
+  assert.equal(run(`parseCdfwWhaleSafeStatus('Recreational Fishery: Status pending Risk Assessments Fishing Zone 3: Open to all permitted methods','3').status`), 'Unparsed');
+  for (const list of ['3-1', '3,7', '13', '3 through 5']) {
+    assert.equal(run(`parseCdfwWhaleSafeStatus(${JSON.stringify('Recreational Fishery: Fishing Zones '+list+': Open to all permitted methods Risk Assessments')},'3').status`), 'Unparsed');
+  }
+});
+
 test("trap prohibition and unknown health never authorize generic GO", () => {
   const run = app();
   assert.equal(run("cdfwAllowsCrabbing({inStatutorySeason:true,status:'Trap prohibition'})"), false);
