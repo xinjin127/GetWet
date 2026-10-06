@@ -1,6 +1,26 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const vm = require("node:vm");
+
+test("rate-limited Open-Meteo uses direct fetch without falling back for unrelated sources", async () => {
+  const source = fs.readFileSync(require.resolve("../script.js"), "utf8").split('document.querySelector(".mode-tabs").addEventListener')[0];
+  const calls = [];
+  const context = vm.createContext({
+    URL, URLSearchParams, AbortController, Date,
+    window: { location: { protocol: "https:", hostname: "test.chatgpt.site" }, setTimeout, clearTimeout },
+    fetch: async (url) => {
+      calls.push(url);
+      return url.startsWith("/api/fetch") ? new Response("rate limited", { status: 429 }) : Response.json({ hourly: {} });
+    }
+  });
+  vm.runInContext(source, context);
+  await vm.runInContext("fetchJson('https://api.open-meteo.com/v1/forecast')", context);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1], "https://api.open-meteo.com/v1/forecast");
+  await assert.rejects(vm.runInContext("fetchText('https://wildlife.ca.gov/Fishing/Ocean')", context), /429/);
+  assert.equal(calls.length, 3);
+});
 
 test("server cache reuses success, never stores upstream errors, and rejects unrelated hosts", async () => {
   const source = fs.readFileSync(require.resolve("../app/api/fetch/route.js"), "utf8");

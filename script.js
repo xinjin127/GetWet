@@ -348,10 +348,15 @@ async function fetchViaCache(url, accept) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(requestUrl, {
+    let response = await fetch(requestUrl, {
       headers: { "Accept": accept },
       signal: controller.signal
     });
+    if (shouldUseServerCache && response.status === 429
+      && ["api.open-meteo.com", "marine-api.open-meteo.com"].includes(new URL(url).hostname)) {
+      response = await fetch(url, { headers: { "Accept": accept }, signal: controller.signal });
+      appState.cache.browserFallbacks = (appState.cache.browserFallbacks || 0) + 1;
+    }
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
 
     const cacheHeader = response.headers.get("x-launch-cache");
@@ -404,6 +409,7 @@ function summarizeServerCacheStats() {
   appState.cache.detail = hits
     ? `Server cache reused ${hits}/${requests} checks; refreshed ${misses}`
     : `Server cache refreshed ${misses}/${requests} checks`;
+  if (appState.cache.browserFallbacks) appState.cache.detail += `; ${appState.cache.browserFallbacks} weather requests loaded directly after a server rate limit`;
 }
 
 async function loadLiveData() {
