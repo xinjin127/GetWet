@@ -71,6 +71,63 @@ test("a partial forecast cannot yield GO, even with calm maxima", () => {
   assert.equal(run("decide().verdict"), "PENDING FORECAST");
 });
 
+test("each failed source preserves other checks and cannot authorize GO", async () => {
+  for (const failed of ['fetchTides', 'fetchNwsWeather', 'fetchMarineForecast', 'fetchAlerts']) {
+    const run = crabScenario();
+    run(`fetchTides = async () => [{t:'2026-11-07 09:00',v:'1.2'}];
+      fetchNwsWeather = async () => weather;
+      fetchMarineForecast = async () => marine;
+      fetchAlerts = async () => [];
+      fetchCdfwCrabStatus = async () => cdfw;
+      ${failed} = async () => { throw new Error('Upstream 503'); };`);
+    const decision = await run('loadCrabbingData()');
+    assert.equal(decision.verdict, 'PENDING CHECKS', failed);
+    assert.equal(decision.sourceSummary.sourceChecks.filter(check => !check.available).length, 1);
+    assert.equal(decision.risks.confidence, 'Required checks incomplete');
+    assert.equal(decision.returnBy, null);
+    if (failed !== 'fetchMarineForecast') assert.ok(decision.sourceSummary.waveSeries.length);
+    if (failed !== 'fetchTides') assert.equal(decision.sourceSummary.tideEvents.length, 1);
+  }
+});
+
+test("missing hazard check cannot conceal a known physical blocker", async () => {
+  const run = crabScenario();
+  run(`marine.forEach(hour => hour.waveHeight = 12);
+    fetchTides = async () => [{t:'2026-11-07 09:00',v:'1.2'}];
+    fetchNwsWeather = async () => weather;
+    fetchMarineForecast = async () => marine;
+    fetchAlerts = async () => {throw new Error('Upstream 503');};
+    fetchCdfwCrabStatus = async () => cdfw;`);
+  const decision = await run('loadCrabbingData()');
+  assert.equal(decision.verdict, 'NO GO THIS WEEKEND');
+  assert.match(decision.headlineReason, /WAVES 12 FT/);
+  assert.equal(decision.risks.confidence, 'Required checks incomplete');
+});
+
+test("NWS response errors are not interpreted as zero hazards", async () => {
+  for (const response of [{}, {error: 'unavailable'}, {features: null}, {features: [{}]}]) {
+    const run = app();
+    run(`fetchJson = async () => (${JSON.stringify(response)})`);
+    await assert.rejects(run('fetchAlerts(missionConfig.crabbing.coords)'), /invalid alert response/);
+  }
+  const run = app();
+  run('fetchJson = async () => ({features: []})');
+  assert.equal((await run('fetchAlerts(missionConfig.crabbing.coords)')).length, 0);
+});
+
+test("empty successful feeds also withhold GO without discarding measurements", async () => {
+  const run = crabScenario();
+  run(`fetchTides = async () => [];
+    fetchNwsWeather = async () => weather;
+    fetchMarineForecast = async () => marine;
+    fetchAlerts = async () => [];
+    fetchCdfwCrabStatus = async () => cdfw;`);
+  const decision = await run('loadCrabbingData()');
+  assert.equal(decision.verdict, 'PENDING CHECKS');
+  assert.match(decision.headlineReason, /NOAA TIDE PREDICTIONS UNAVAILABLE/);
+  assert.ok(decision.sourceSummary.waveSeries.length);
+});
+
 test("full decision matrix agrees with the configured wave and wind boundaries", () => {
   const run = crabScenario();
   for (const wave of [0, 3, 5, 5.01, 6, 6.01, 12]) {

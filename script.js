@@ -252,7 +252,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v22";
+const CACHE_VERSION = "launch-window-v23";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -428,20 +428,31 @@ async function loadLiveData() {
 
 async function loadCrabbingData() {
   const crabbing = missionConfig.crabbing;
-  const [tides, weather, marine, alerts, cdfwCrabStatus] = await Promise.all([
-    fetchTides({ station: sourceConfig.tides.station }),
-    fetchNwsWeather(crabbing.coords),
-    fetchMarineForecast(crabbing.coords),
-    fetchAlerts(crabbing.coords),
+  const [feeds, cdfwCrabStatus] = await Promise.all([
+    Promise.allSettled([
+      fetchTides({ station: sourceConfig.tides.station }),
+      fetchNwsWeather(crabbing.coords),
+      fetchMarineForecast(crabbing.coords),
+      fetchAlerts(crabbing.coords)
+    ]),
     fetchCdfwCrabStatus(crabbing)
   ]);
+  const defaults = [[], { periods: [], sourceName: sourceConfig.weather.name }, [], []];
+  const [tides, weather, marine, alerts] = feeds.map((feed, index) => feed.status === "fulfilled" ? feed.value : defaults[index]);
+  const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check"];
+  const sourceChecks = feeds.map((feed, index) => ({
+    name: names[index],
+    available: feed.status === "fulfilled" && (index === 3 || (index === 1 ? weather.periods.length : feed.value.length) > 0),
+    detail: feed.status === "rejected" ? String(feed.reason?.message || "Request failed") : ""
+  }));
   return evaluateCrabbing({
     config: crabbing,
     weather,
     marine,
     tides,
     alerts,
-    cdfwCrabStatus
+    cdfwCrabStatus,
+    sourceChecks
   });
 }
 
@@ -585,6 +596,7 @@ function readCachedData(cacheKey) {
 function writeCachedData(cacheKey, data) {
   const decisions = [data.crabbing, ...(data.spearfishing?.options || [])];
   if (decisions.some((item) => !item?.sourceSummary?.selectedWindow?.complete)
+    || data.crabbing?.sourceSummary?.sourceChecks?.some((check) => !check.available)
     || !data.clamming?.sourceSummary?.waveSeries?.length
     || !data.clamming?.sourceSummary?.windSeries?.length
     || !data.crabbing?.sourceSummary?.cdfwCrabStatus?.health?.sourceAvailable
@@ -711,7 +723,10 @@ async function fetchAlerts(coords) {
     point: `${coords.latitude},${coords.longitude}`
   });
   const data = await fetchJson(`${sourceConfig.nws.alertsUrl}?${params}`);
-  return (data.features || []).map((feature) => feature.properties).filter(isRelevantWeekendAlert);
+  if (!Array.isArray(data.features) || data.features.some((feature) => !feature?.properties || typeof feature.properties.event !== "string")) {
+    throw new Error("NWS returned an invalid alert response");
+  }
+  return data.features.map((feature) => feature.properties).filter(isRelevantWeekendAlert);
 }
 
 function isRelevantWeekendAlert(alert) {
@@ -1242,7 +1257,7 @@ function formatShortDateTime(dateValue) {
   });
 }
 
-function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus }) {
+function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus, sourceChecks = [] }) {
   const weatherMorning = morningHours(weather.periods);
   const marineMorning = morningHours(marine);
   const allWeather = weather.periods;
@@ -1283,7 +1298,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   }
   if (cdfwAllowed && !selectedWindow?.complete) verdict = "PENDING FORECAST";
 
-  const headlineReason = getCrabbingHeadlineReason({
+  let headlineReason = getCrabbingHeadlineReason({
     cdfwCrabStatus,
     alerts,
     maxMorningWave,
@@ -1291,6 +1306,13 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     maxMorningWind,
     selectedWindow
   });
+  const failedChecks = sourceChecks.filter((check) => !check.available);
+  if (failedChecks.length && /^(GO|MAYBE|PENDING)/.test(verdict)) {
+    verdict = "PENDING CHECKS";
+    headlineReason = `${failedChecks.map((check) => check.name).join("; ").toUpperCase()} UNAVAILABLE`;
+    bestWindow = "No departure recommended until missing checks resolve";
+    returnBy = null;
+  }
 
   return {
     spot: config.spot,
@@ -1302,6 +1324,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     bestWindow,
     returnBy,
     sourceSummary: {
+      sourceChecks,
       tideEvents: tides,
       waveSeries: buildWaveSeries(allMarine),
       windSeries: buildWindSeries(allWeather),
@@ -1322,7 +1345,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
       windDrift: selectedWindow?.maxWind !== null && selectedWindow?.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
       current: "Current not measured",
       currentDetail: "NOAA tide height does not measure tidal-current speed. This screen grades wind, waves and swell only; Golden Gate return currents have not been evaluated.",
-      confidence: !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
+      confidence: failedChecks.length ? "Required checks incomplete" : !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
     },
     reasons: buildCrabbingReasons({
       maxMorningWind,
@@ -2686,7 +2709,9 @@ function renderCrabbing() {
         {
           label: "Confidence",
           value: data.risks.confidence,
-          detail: summary.alerts.length
+          detail: summary.sourceChecks?.some((check) => !check.available)
+            ? summary.sourceChecks.filter((check) => !check.available).map((check) => `${check.name}: ${check.detail || "no data returned for this weekend"}.`).join(" ")
+            : summary.alerts.length
             ? `The NWS alert check independently returned ${summarizeAlerts(summary.alerts)} for the area.`
             : "No currently published NWS hazard overlaps the selected morning. Future alerts may still be issued; forecast coverage is shown independently."
         }
