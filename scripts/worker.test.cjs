@@ -17,7 +17,11 @@ test("Sites worker serves upstream data when the default Cache API is forbidden"
     Object.defineProperty(global, "caches", { configurable: true, value: {
       get default() { throw new Error("This Worker is not permitted to access the default cache."); }
     } });
-    global.fetch = async () => { calls++; return Response.json({ predictions: [{ t: "2026-10-10 00:00", v: "1.0" }] }); };
+    global.fetch = async (_, options) => {
+      assert.equal(options.redirect, "manual", "Cloudflare does not support redirect:error");
+      calls++;
+      return Response.json({ predictions: [{ t: "2026-10-10 00:00", v: "1.0" }] });
+    };
     const { default: worker } = await import(pathToFileURL(path.join(dir, "index.mjs")));
     const request = new Request("https://app.test/api/fetch?url=https://api.tidesandcurrents.noaa.gov/regression-test");
     const first = await worker.fetch(request, {}, {});

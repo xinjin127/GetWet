@@ -66,9 +66,12 @@ export async function GET(request) {
         "user-agent": "LaunchWindowPOC/1.0"
       },
       signal: AbortSignal.timeout(15000),
-      redirect: "error",
+      redirect: "manual",
       cache: "no-store"
     });
+    if (upstream.status >= 300 && upstream.status < 400) {
+      throw new Error("Upstream redirect rejected; source URL needs updating");
+    }
     const body = await upstream.arrayBuffer();
     const payload = {
       status: upstream.status,
