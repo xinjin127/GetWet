@@ -153,6 +153,31 @@ test("empty successful feeds also withhold GO without discarding measurements", 
   assert.ok(decision.sourceSummary.waveSeries.length);
 });
 
+test("future null forecasts are unavailable, not hazardous measurements", async () => {
+  const run = crabScenario();
+  run(`marine.forEach(row => row.waveHeight = null);
+    weather.periods.forEach(row => row.windSpeed = null);
+    fetchTides = async () => [{t:'2026-11-07 09:00',v:'1.2'}];
+    fetchNwsWeather = async () => weather;
+    fetchMarineForecast = async () => marine;
+    fetchAlerts = async () => [];
+    fetchCdfwCrabStatus = async () => cdfw;`);
+  const decision = await run('loadCrabbingData()');
+  assert.equal(decision.risks.entryExit, 'Wave forecast unavailable');
+  assert.equal(decision.risks.windDrift, 'Wind forecast unavailable');
+  assert.equal(decision.verdict, 'PENDING CHECKS');
+  assert.equal(decision.sourceSummary.sourceChecks.filter(check => !check.available).length, 2);
+});
+
+test("surf charts never present axis defaults as measured waves, wind or period", () => {
+  const run = app();
+  assert.equal(run("renderSurfGraph([{time:'2026-11-07T08:00',waveHeight:null,swellPeriod:null}],[])"), '');
+  const graph = run("renderSurfGraph([{time:'2026-11-07T08:00',waveHeight:0,swellPeriod:null}],[])");
+  assert.match(graph, /0\.0 ft max waves/);
+  assert.match(graph, /Unavailable max period/);
+  assert.match(graph, /Unavailable max wind/);
+});
+
 test("full decision matrix agrees with the configured wave and wind boundaries", () => {
   const run = crabScenario();
   for (const wave of [0, 3, 5, 5.01, 6, 6.01, 12]) {

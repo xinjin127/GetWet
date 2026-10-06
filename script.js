@@ -261,7 +261,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v27";
+const CACHE_VERSION = "launch-window-v28";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -453,7 +453,10 @@ async function loadCrabbingData() {
   const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check", "Sunrise and sunset", "NOAA current predictions"];
   const sourceChecks = feeds.map((feed, index) => ({
     name: names[index],
-    available: feed.status === "fulfilled" && (index === 3 || (index === 1 ? weather.periods.length : feed.value.length) > 0),
+    available: feed.status === "fulfilled" && (index === 3
+      || (index === 1 ? weather.periods.some((row) => Number.isFinite(parseWindMph(row.windSpeed)))
+        : index === 2 ? marine.some((row) => Number.isFinite(row.waveHeight))
+          : feed.value.length > 0)),
     detail: feed.status === "rejected" ? String(feed.reason?.message || "Request failed") : ""
   }));
   return evaluateCrabbing({
@@ -1412,8 +1415,8 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
       cdfwCrabStatus
     },
     risks: {
-      entryExit: selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
-      windDrift: selectedWindow?.maxWind !== null && selectedWindow?.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
+      entryExit: !Number.isFinite(selectedWindow?.maxWave) ? "Wave forecast unavailable" : selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
+      windDrift: !Number.isFinite(selectedWindow?.maxWind) ? "Wind forecast unavailable" : selectedWindow.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
       current: currents.length ? "Nearby predictions available; route risk unassessed" : "Current predictions unavailable",
       currentDetail: describeCrabbingCurrents(currents, selectedWindow),
       confidence: failedChecks.length ? "Required checks incomplete" : !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
@@ -2291,14 +2294,14 @@ function renderConditionGraphs(item, tideEvents = []) {
 function renderSurfGraph(waveSeries, windSeries) {
   if (!waveSeries.length) return "";
   const waveValues = waveSeries.map((point) => point.waveHeight).filter(Number.isFinite);
+  if (!waveValues.length) return "";
   const periodValues = waveSeries.map((point) => point.swellPeriod).filter(Number.isFinite);
   const windValues = windSeries.map((point) => point.windMph).filter(Number.isFinite);
-  const maxWave = maxNumber(waveValues) || 1;
-  const maxPeriod = maxNumber(periodValues) || 1;
-  const maxWind = maxNumber(windValues) || 1;
-  const wavePoints = buildChartPoints(waveSeries, "waveHeight", maxWave, 220, 82);
-  const periodPoints = buildChartPoints(waveSeries, "swellPeriod", maxPeriod, 220, 82);
-  const windBars = buildWindBars(windSeries, maxWind, 220, 82);
+  const maxWave = maxNumber(waveValues);
+  const maxPeriod = maxNumber(periodValues);
+  const maxWind = maxNumber(windValues);
+  const axisMax = Math.max(1, maxWave);
+  const wavePoints = buildChartPoints(waveSeries, "waveHeight", axisMax, 220, 82);
   const timeLabels = buildFixedHourAxisLabels();
 
   return `
@@ -2322,8 +2325,8 @@ function renderSurfGraph(waveSeries, windSeries) {
         <line x1="36" y1="18" x2="36" y2="100" class="graph-axis"></line>
         <line x1="36" y1="18" x2="256" y2="18" class="graph-grid-line"></line>
         <line x1="36" y1="59" x2="256" y2="59" class="graph-grid-line"></line>
-        <text x="2" y="21" class="graph-label">${formatNumber(maxWave, " ft")}</text>
-        <text x="8" y="62" class="graph-label">${formatNumber(maxWave / 2, " ft")}</text>
+        <text x="2" y="21" class="graph-label">${formatNumber(axisMax, " ft")}</text>
+        <text x="8" y="62" class="graph-label">${formatNumber(axisMax / 2, " ft")}</text>
         <text x="18" y="103" class="graph-label">0</text>
         <text x="7" y="143" class="graph-axis-title">y: wave height (ft) · x: Pacific time</text>
         <polyline points="${wavePoints}" class="graph-fill-line"></polyline>
