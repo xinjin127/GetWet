@@ -29,7 +29,9 @@ function crabScenario() {
       whaleSafe: { status: 'Open to all permitted methods', sourceAvailable: true, detail: 'Test status' }
     };
     var alerts = [];
-    var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw});
+    var daylight = [7,8].map(day => ({day:'2026-11-0'+day,sunrise:'2026-11-0'+day+'T06:00',sunset:'2026-11-0'+day+'T17:00'}));
+    fetchDaylight = async () => daylight;
+    var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw, daylight});
   `);
   return run;
 }
@@ -72,7 +74,7 @@ test("a partial forecast cannot yield GO, even with calm maxima", () => {
 });
 
 test("each failed source preserves other checks and cannot authorize GO", async () => {
-  for (const failed of ['fetchTides', 'fetchNwsWeather', 'fetchMarineForecast', 'fetchAlerts']) {
+  for (const failed of ['fetchTides', 'fetchNwsWeather', 'fetchMarineForecast', 'fetchAlerts', 'fetchDaylight']) {
     const run = crabScenario();
     run(`fetchTides = async () => [{t:'2026-11-07 09:00',v:'1.2'}];
       fetchNwsWeather = async () => weather;
@@ -183,12 +185,31 @@ test("trap prohibition and unknown health never authorize generic GO", () => {
 });
 
 test("only six aligned morning hours can produce GO", () => {
-  const run = app();
+  const run = crabScenario();
   run(`var wind = Array.from({length:6}, (_,i)=>({startTime:'2026-11-07T'+String(i+6).padStart(2,'0')+':00',windSpeed:8})); var waves = wind.map(row=>({...row,waveHeight:3,swellHeight:2,swellPeriod:10}));`);
   assert.equal(run("hasCompleteMorning(wind, waves)"), true);
   assert.equal(run("hasCompleteMorning(wind.slice(0,1), waves)"), false);
   assert.equal(run("buildCrabbingMorningWindows({weather:wind.slice(0,1),marine:waves,config:missionConfig.crabbing})[0].status"), "no-go");
-  assert.equal(run("buildCrabbingMorningWindows({weather:wind,marine:waves,config:missionConfig.crabbing})[0].status"), "go");
+  assert.equal(run("buildCrabbingMorningWindows({weather:wind,marine:waves,config:missionConfig.crabbing,daylight})[0].status"), "go");
+});
+
+test("winter windows start after sunrise and do not grade pre-dawn waves", () => {
+  const run = crabScenario();
+  run(`daylight.forEach(row => row.sunrise = row.day+'T07:24');
+    marine.forEach(row => {if (new Date(row.startTime).getHours() < 8) row.waveHeight = 12;});`);
+  assert.equal(run('decide().verdict'), 'GO SATURDAY MORNING');
+  assert.match(run('decide().bestWindow'), /8-11am Pacific/);
+  assert.match(run('decide().returnBy'), /11am Pacific/);
+  run("marine = marine.filter(row => new Date(row.startTime).getHours() !== 9)");
+  assert.equal(run('decide().verdict'), 'PENDING FORECAST');
+});
+
+test("missing or invalid daylight never authorizes crabbing GO", () => {
+  for (const change of ['daylight=[]', "daylight.forEach(row => row.sunrise='invalid')", "daylight.forEach(row => row.sunrise=row.day+'T10:30')"]) {
+    const run = crabScenario();
+    run(change);
+    assert.equal(run('decide().verdict'), 'PENDING FORECAST');
+  }
 });
 
 test("expired or irrelevant alerts do not veto the weekend", () => {

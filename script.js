@@ -252,7 +252,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v23";
+const CACHE_VERSION = "launch-window-v24";
 const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -433,13 +433,14 @@ async function loadCrabbingData() {
       fetchTides({ station: sourceConfig.tides.station }),
       fetchNwsWeather(crabbing.coords),
       fetchMarineForecast(crabbing.coords),
-      fetchAlerts(crabbing.coords)
+      fetchAlerts(crabbing.coords),
+      fetchDaylight(crabbing.coords)
     ]),
     fetchCdfwCrabStatus(crabbing)
   ]);
-  const defaults = [[], { periods: [], sourceName: sourceConfig.weather.name }, [], []];
-  const [tides, weather, marine, alerts] = feeds.map((feed, index) => feed.status === "fulfilled" ? feed.value : defaults[index]);
-  const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check"];
+  const defaults = [[], { periods: [], sourceName: sourceConfig.weather.name }, [], [], []];
+  const [tides, weather, marine, alerts, daylight] = feeds.map((feed, index) => feed.status === "fulfilled" ? feed.value : defaults[index]);
+  const names = ["NOAA tide predictions", "Wind forecast", "Marine wave forecast", "NWS hazard check", "Sunrise and sunset"];
   const sourceChecks = feeds.map((feed, index) => ({
     name: names[index],
     available: feed.status === "fulfilled" && (index === 3 || (index === 1 ? weather.periods.length : feed.value.length) > 0),
@@ -452,7 +453,8 @@ async function loadCrabbingData() {
     tides,
     alerts,
     cdfwCrabStatus,
-    sourceChecks
+    sourceChecks,
+    daylight
   });
 }
 
@@ -1187,11 +1189,11 @@ function finiteValue(value) {
   return value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Number(value);
 }
 
-function hasCompleteMorning(weather, marine) {
+function hasCompleteMorning(weather, marine, expectedHours = [6, 7, 8, 9, 10, 11]) {
   const hours = (rows, valid) => new Set(rows.filter(valid).map((row) => new Date(row.startTime).getHours()));
   const windHours = hours(weather, (row) => Number.isFinite(parseWindMph(row.windSpeed)));
   const waveHours = hours(marine, (row) => [row.waveHeight, row.swellHeight, row.swellPeriod].every(Number.isFinite));
-  return [6, 7, 8, 9, 10, 11].every((hour) => windHours.has(hour) && waveHours.has(hour));
+  return expectedHours.length >= 3 && expectedHours.every((hour) => windHours.has(hour) && waveHours.has(hour));
 }
 
 function filterWeekendHours(periods) {
@@ -1257,7 +1259,7 @@ function formatShortDateTime(dateValue) {
   });
 }
 
-function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus, sourceChecks = [] }) {
+function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStatus, sourceChecks = [], daylight = [] }) {
   const weatherMorning = morningHours(weather.periods);
   const marineMorning = morningHours(marine);
   const allWeather = weather.periods;
@@ -1269,7 +1271,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   const maxMorningSwellHeight = maxNumber(marineMorning.map((hour) => hour.swellHeight));
   const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
   const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
-  const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config, alerts });
+  const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config, alerts, daylight });
   const bestGoWindow = windows.find((window) => window.status === "go" && window.legalDay);
   const bestMaybeWindow = windows.find((window) => window.status === "maybe" && window.legalDay);
   const selectedWindow = bestGoWindow || bestMaybeWindow || windows[0] || null;
@@ -1283,12 +1285,12 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
 
   if (bestGoWindow && !hasAdvisory && cdfwAllowed) {
     verdict = `GO ${bestGoWindow.dayName.toUpperCase()} MORNING`;
-    bestWindow = `${bestGoWindow.dayName} 6-11am looks inside the updated 5 ft / 12 mph window`;
-    returnBy = "Before late-morning wind builds";
+    bestWindow = `${bestGoWindow.dayName} ${bestGoWindow.timeLabel} is within the 5 ft / 12 mph limits`;
+    returnBy = "11am Pacific; later hours not assessed";
   } else if (bestMaybeWindow && !hasAdvisory && cdfwAllowed) {
     verdict = `MAYBE ${bestMaybeWindow.dayName.toUpperCase()} MORNING`;
-    bestWindow = `${bestMaybeWindow.dayName} 6-11am is marginal; recheck same-day`;
-    returnBy = "Before late-morning wind builds";
+    bestWindow = `${bestMaybeWindow.dayName} ${bestMaybeWindow.timeLabel} is marginal; recheck same-day`;
+    returnBy = "11am Pacific; later hours not assessed";
   }
 
   if (!cdfwAllowed) {
@@ -1363,19 +1365,27 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   };
 }
 
-function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
+function buildCrabbingMorningWindows({ weather, marine, config, alerts = [], daylight = [] }) {
   const weekend = getSelectedWeekend();
   return [weekend.saturday, weekend.sunday]
     .map((date) => {
-      const weatherHours = morningHoursForDate(weather, date);
-      const marineHours = morningHoursForDate(marine, date);
+      const sun = daylight.find((row) => row.day === toIsoDate(date));
+      const sunrise = new Date(sun?.sunrise);
+      const sunset = new Date(sun?.sunset);
+      const validDaylight = Number.isFinite(+sunrise) && Number.isFinite(+sunset)
+        && toIsoDate(sunrise) === toIsoDate(date) && sunset > sunrise;
+      const startHour = validDaylight ? Math.max(6, Math.ceil(sunrise.getHours() + sunrise.getMinutes() / 60)) : null;
+      const expectedHours = validDaylight ? [6, 7, 8, 9, 10, 11].filter((hour) => hour >= startHour && hour <= sunset.getHours()) : [];
+      const timeLabel = expectedHours.length >= 3 ? `${startHour}-11am Pacific` : "daylight window unavailable";
+      const weatherHours = morningHoursForDate(weather, date).filter((row) => expectedHours.includes(new Date(row.startTime).getHours()));
+      const marineHours = morningHoursForDate(marine, date).filter((row) => expectedHours.includes(new Date(row.startTime).getHours()));
       const maxWind = maxNumber(weatherHours.map((period) => parseWindMph(period.windSpeed)));
       const maxWave = maxNumber(marineHours.map((hour) => hour.waveHeight));
       const maxSwellPeriod = maxNumber(marineHours.map((hour) => hour.swellPeriod || hour.wavePeriod));
       const maxSwellHeight = maxNumber(marineHours.map((hour) => hour.swellHeight));
       const swellPairs = marineHours.map((hour) => ({ height: hour.swellHeight, period: hour.swellPeriod }));
-      const complete = hasCompleteMorning(weatherHours, marineHours);
-      const windowAlerts = alertsForMorning(alerts, date);
+      const complete = hasCompleteMorning(weatherHours, marineHours, expectedHours);
+      const windowAlerts = alertsForMorning(alerts, date, startHour ?? 6, 11);
       const season = getCdfwDungenessSeasonWindow(date, config.cdfwCountyGroup);
       const legalDay = date >= season.start && date <= season.end;
       const status = !complete || windowAlerts.length ? "no-go" : gradeCrabbingWindow({
@@ -1389,6 +1399,8 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
 
       return {
         date,
+        timeLabel,
+        sunrise: sun?.sunrise || null,
         dayName: date.toLocaleDateString(undefined, { weekday: "long" }),
         maxWind,
         maxWave,
@@ -1404,11 +1416,11 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [] }) {
     .sort((a, b) => getCrabbingWindowRank(b.status) - getCrabbingWindowRank(a.status));
 }
 
-function alertsForMorning(alerts, date) {
+function alertsForMorning(alerts, date, startHour = 6, endHour = 12) {
   const start = new Date(date);
-  start.setHours(6);
+  start.setHours(startHour);
   const end = new Date(date);
-  end.setHours(12);
+  end.setHours(endHour);
   return alerts.filter((alert) => pacificWallTime(alert.onset || alert.effective) < end && pacificWallTime(alert.ends || alert.expires) > start);
 }
 
@@ -1454,7 +1466,7 @@ function getCrabbingHeadlineReason({ cdfwCrabStatus, alerts, selectedWindow }) {
   if (cdfwCrabStatus.status === "Automatic CDFW check incomplete") return "CDFW STATUS UNVERIFIED";
   if (cdfwCrabStatus.status === "Trap prohibition") return "CRAB TRAP PROHIBITION";
   if (alerts.length) return summarizeAlerts(alerts).toUpperCase();
-  if (!selectedWindow?.complete) return "FORECAST INCOMPLETE FOR 6-11AM";
+  if (!selectedWindow?.complete) return "DAYLIGHT OR HOURLY FORECAST INCOMPLETE";
   const limits = missionConfig.crabbing.thresholds.go;
   if (selectedWindow.maxWave > limits.maxWaveFeet) return `WAVES ${formatNumber(selectedWindow.maxWave, " FT")} ABOVE ${limits.maxWaveFeet} FT GO LIMIT`;
   if (selectedWindow.maxWind > limits.maxWindMph) return `WIND ${formatNumber(selectedWindow.maxWind, " MPH")} ABOVE ${limits.maxWindMph} MPH GO LIMIT`;
@@ -1493,7 +1505,7 @@ function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellP
   if (selectedWindow) {
     reasons.push({
       type: selectedWindow.status === "go" ? "good" : selectedWindow.status === "maybe" ? "warn" : "bad",
-      text: `Best individual morning is ${selectedWindow.dayName} 6-11am: waves ${formatNumber(selectedWindow.maxWave, " ft")}, wind ${formatNumber(selectedWindow.maxWind, " mph")}, swell ${formatNumber(selectedWindow.maxSwellHeight, " ft")} at ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}.`
+      text: `Best individual morning is ${selectedWindow.dayName} ${selectedWindow.timeLabel}: waves ${formatNumber(selectedWindow.maxWave, " ft")}, wind ${formatNumber(selectedWindow.maxWind, " mph")}. Separate swell maxima: height ${formatNumber(selectedWindow.maxSwellHeight, " ft")}; period ${formatNumber(selectedWindow.maxSwellPeriod, " sec")}.`
     });
   }
   if (windows?.length) {
@@ -1512,7 +1524,7 @@ function buildCrabbingReasons({ maxMorningWind, maxMorningWave, maxMorningSwellP
       && (maxMorningSwellHeight <= thresholds.go.maxSwellHeightFeet || maxMorningSwellPeriod <= thresholds.go.maxSwellPeriodSeconds)
       ? "warn"
       : "bad",
-    text: `Swell reaches ${formatNumber(maxMorningSwellHeight, " ft")} at ${formatNumber(maxMorningSwellPeriod, " sec")}; long period is a hard blocker only when paired with larger swell height.`
+    text: `Separate weekend swell maxima: height ${formatNumber(maxMorningSwellHeight, " ft")}; period ${formatNumber(maxMorningSwellPeriod, " sec")}. These may occur at different hours; grading checks height and period together at each hour.`
   });
   reasons.push({
     type: maxMorningWind !== null && maxMorningWind <= thresholds.maybe.maxWindMph ? "warn" : "bad",
@@ -2692,9 +2704,16 @@ function renderCrabbing() {
       extraMetrics: [
         getWaterSourceMetric(sourceConfig.tides),
         {
+          label: "Daylight window",
+          value: summary.selectedWindow?.timeLabel || "Unavailable",
+          detail: summary.selectedWindow?.sunrise
+            ? `Sunrise ${formatTimeLabel(summary.selectedWindow.sunrise)} Pacific, from Open-Meteo. Launch is rounded up to the next forecast hour; return by 11am.`
+            : "Sunrise and sunset data have not been verified for this morning."
+        },
+        {
           label: "Entry / exit risk",
           value: data.risks.entryExit,
-          detail: `${summary.selectedWindow?.dayName || "Selected"} 6-11am waves reach ${formatNumber(summary.selectedWindow?.maxWave, " ft")}; whole-weekend morning maximum ${formatNumber(summary.maxMorningWave, " ft")}.`
+          detail: `${summary.selectedWindow?.dayName || "Selected"} ${summary.selectedWindow?.timeLabel || "morning"} waves reach ${formatNumber(summary.selectedWindow?.maxWave, " ft")}; whole-weekend morning maximum ${formatNumber(summary.maxMorningWave, " ft")}.`
         },
         {
           label: "Wind drift risk",
