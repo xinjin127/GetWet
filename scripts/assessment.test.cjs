@@ -31,11 +31,31 @@ function crabScenario() {
     var alerts = [];
     var daylight = [7,8].map(day => ({day:'2026-11-0'+day,sunrise:'2026-11-0'+day+'T06:00',sunset:'2026-11-0'+day+'T17:00'}));
     fetchDaylight = async () => daylight;
-    fetchCurrentPredictions = async () => [{time:'2026-11-07T09:00',speedKnots:0,type:'slack'}];
-    var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw, daylight});
+    var currents = [7,8].flatMap(day => [
+      {time:'2026-11-0'+day+'T05:00',type:'slack',speedKnots:0},
+      {time:'2026-11-0'+day+'T08:00',type:'flood',speedKnots:0.2,directionDegrees:38},
+      {time:'2026-11-0'+day+'T12:00',type:'slack',speedKnots:0}
+    ]);
+    fetchCurrentPredictions = async () => currents;
+    var decide = () => evaluateCrabbing({config: missionConfig.crabbing, weather, marine, tides: [], alerts, cdfwCrabStatus: cdfw, daylight, currents});
   `);
   return run;
 }
+
+test("provisional SUP current thresholds grade both days and preserve closures", () => {
+  const run = crabScenario();
+  for (const [speed, expected] of [[0.49,'GO'],[0.5,'MAYBE'],[0.99,'MAYBE'],[1,'NO GO'],[1.5,'NO GO']]) {
+    run(`currents.filter(row=>row.type==='flood').forEach(row=>row.speedKnots=${speed})`);
+    assert.ok(run('decide().verdict').startsWith(expected), `${speed}: ${expected}`);
+  }
+  assert.match(run('decide().headlineReason'), /1.5 KN.*TOWARD BAKER/);
+  run('currents[4].speedKnots=0.2');
+  assert.equal(run('decide().verdict'), 'GO SUNDAY MORNING');
+  run('currents=[]');
+  assert.equal(run('decide().verdict'), 'PENDING CHECKS');
+  run('cdfw.inStatutorySeason=false; cdfw.status="Closed by season date"');
+  assert.match(run('decide().headlineReason'), /SEASON CLOSED/);
+});
 
 test("a GO Saturday never cites Sunday's waves as its blocker", () => {
   const run = crabScenario();

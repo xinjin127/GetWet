@@ -78,7 +78,8 @@ const sourceConfig = {
 const missionConfig = {
   crabbing: {
     spot: "China Beach",
-    activity: "Paddleboard / kayak hoop-net crabbing",
+    activity: "Paddleboard hoop-net crabbing",
+    currentLimits: { cautionKnots: 0.5, noGoKnots: 1 },
     coords: { latitude: 37.7889, longitude: -122.4898 },
     // NWS resolves the beach itself to land zones; also sample the water immediately north.
     alertWaterCoords: { latitude: 37.7900, longitude: -122.4900 },
@@ -86,7 +87,7 @@ const missionConfig = {
     // Zone 3 spans 38 degrees 46.125 minutes N to Pigeon Point (37 degrees 11 minutes N).
     cdfwRampZone: "3",
     method: "hoops",
-    question: "Can I crab from a paddleboard or kayak at China Beach this upcoming Saturday or Sunday?",
+    question: "Can I crab from a paddleboard at China Beach this upcoming Saturday or Sunday?",
     thresholds: {
       go: { maxWaveFeet: 5, maxWindMph: 12, maxSwellHeightFeet: 3, maxSwellPeriodSeconds: 14 },
       maybe: { maxWaveFeet: 6, maxWindMph: 14, maxSwellHeightFeet: 4, maxSwellPeriodSeconds: 16 }
@@ -264,7 +265,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v32";
+const CACHE_VERSION = "launch-window-v33";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -507,6 +508,27 @@ async function fetchCurrentPredictions() {
   return predictions;
 }
 
+function assessPaddleboardCurrent(currents, window, limits = missionConfig.crabbing.currentLimits) {
+  const unknown = { status: "pending", reason: "CURRENT WINDOW COVERAGE UNAVAILABLE" };
+  if (!Number.isFinite(window?.startHour) || !Number.isFinite(window?.endHour)) return unknown;
+  const start = new Date(window.date), end = new Date(window.date);
+  start.setHours(window.startHour, 0, 0, 0);
+  end.setHours(window.endHour, 0, 0, 0);
+  const rows = [...currents].sort((a, b) => a.time.localeCompare(b.time));
+  let covered = +start, peak = null;
+  for (let i = 1; i < rows.length - 1; i++) {
+    const row = rows[i], from = +new Date(rows[i - 1].time), until = +new Date(rows[i + 1].time);
+    if (!["ebb", "flood"].includes(row.type) || rows[i - 1].type !== "slack" || rows[i + 1].type !== "slack" || until <= +start || from >= +end) continue;
+    if (from > covered || !Number.isFinite(row.speedKnots) || !Number.isFinite(row.directionDegrees)) return unknown;
+    covered = Math.max(covered, until);
+    if (!peak || row.speedKnots > peak.speedKnots) peak = row;
+  }
+  if (covered < +end || !peak) return unknown;
+  const status = peak.speedKnots >= limits.noGoKnots ? "no-go" : peak.speedKnots >= limits.cautionKnots ? "maybe" : "go";
+  const toward = peak.directionDegrees >= 0 && peak.directionDegrees <= 90;
+  return { status, peak, reason: `OFFSHORE PHASE PEAK ${formatNumber(peak.speedKnots, " KN")} ${toward ? "TOWARD BAKER" : "RETURN-CURRENT RISK"}; PROVISIONAL SUP ${status === "no-go" ? "NO-GO" : "CAUTION"} LIMIT ${status === "no-go" ? limits.noGoKnots : limits.cautionKnots} KN` };
+}
+
 function assessBakerDrift(currents, selectedWindow) {
   const unknown = { title: "Baker Beach drift cannot be assessed", detail: "Current direction or full window coverage is unavailable." };
   if (!Number.isFinite(selectedWindow?.startHour) || !Number.isFinite(selectedWindow?.endHour)) return unknown;
@@ -551,7 +573,9 @@ function describeCrabbingCurrents(currents, selectedWindow) {
   const ebb = maxNumber(rows.filter((row) => row.type === "ebb").map((row) => row.speedKnots));
   const flood = maxNumber(rows.filter((row) => row.type === "flood").map((row) => row.speedKnots));
   const slack = rows.filter((row) => row.type === "slack").map((row) => formatTimeLabel(row.time)).join(", ");
-  return `${assessBakerDrift(currents, selectedWindow).detail} ${selectedWindow.dayName} daily peak ebb ${formatNumber(ebb, " kn")}; peak flood ${formatNumber(flood, " kn")}. Slack predictions: ${slack} Pacific. ${context}`;
+  const screen = assessPaddleboardCurrent(currents, selectedWindow);
+  const limits = missionConfig.crabbing.currentLimits;
+  return `${assessBakerDrift(currents, selectedWindow).detail} Provisional paddleboard screen: ${screen.status.toUpperCase()}. Caution at ${limits.cautionKnots} kn; no-go at ${limits.noGoKnots} kn, based on the whole phase peak even if outside your window. These are unvalidated planning limits, not measured beach-current limits. ${selectedWindow.dayName} daily peak ebb ${formatNumber(ebb, " kn")}; peak flood ${formatNumber(flood, " kn")}. Slack predictions: ${slack} Pacific. ${context}`;
 }
 
 async function loadSpearfishingData() {
@@ -1411,6 +1435,13 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
   const maxWeekendWave = maxNumber(allMarine.map((hour) => hour.waveHeight));
   const maxWeekendWind = maxNumber(allWeather.map((period) => parseWindMph(period.windSpeed)));
   const windows = buildCrabbingMorningWindows({ weather: allWeather, marine: allMarine, config, alerts, daylight });
+  for (const window of windows) {
+    window.weatherStatus = window.status;
+    window.currentScreen = assessPaddleboardCurrent(currents, window, config.currentLimits);
+    if (window.currentScreen.status === "no-go" || window.currentScreen.status === "pending") window.status = "no-go";
+    else if (window.currentScreen.status === "maybe" && window.status === "go") window.status = "maybe";
+  }
+  windows.sort((a, b) => getCrabbingWindowRank(b.status) - getCrabbingWindowRank(a.status));
   const bestGoWindow = windows.find((window) => window.status === "go" && window.legalDay);
   const bestMaybeWindow = windows.find((window) => window.status === "maybe" && window.legalDay);
   const selectedWindow = bestGoWindow || bestMaybeWindow || windows[0] || null;
@@ -1448,6 +1479,17 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     selectedWindow
   });
   const failedChecks = sourceChecks.filter((check) => !check.available);
+  if (cdfwAllowed && selectedWindow?.complete && !hasAdvisory) {
+    const current = selectedWindow.currentScreen;
+    if (current.status === "no-go") headlineReason = current.reason;
+    else if (current.status === "maybe" && verdict.startsWith("MAYBE")) headlineReason = current.reason;
+    else if (current.status === "pending" && selectedWindow.weatherStatus !== "no-go") {
+      verdict = "PENDING CHECKS";
+      headlineReason = current.reason;
+      bestWindow = "No departure recommended until current coverage resolves";
+      returnBy = null;
+    }
+  }
   if (failedChecks.length && /^(GO|MAYBE|PENDING)/.test(verdict)) {
     verdict = "PENDING CHECKS";
     headlineReason = `${failedChecks.map((check) => check.name).join("; ").toUpperCase()} UNAVAILABLE`;
