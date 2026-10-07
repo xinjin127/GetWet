@@ -118,6 +118,20 @@ test("NWS response errors are not interpreted as zero hazards", async () => {
   assert.equal((await run('fetchAlerts(missionConfig.crabbing.coords)')).length, 0);
 });
 
+test("China Beach hazard checks include offshore-only alerts and deduplicate shared alerts", async () => {
+  const run = app();
+  run(`var calls=[]; var marineAlert={id:'marine-1',event:'Small Craft Advisory',status:'Actual',
+    onset:'2026-11-07T07:00:00-08:00',expires:'2026-11-07T13:00:00-08:00'};
+    fetchJson=async url => {calls.push(url);return {features:url.includes('37.79%2C') ? [{properties:marineAlert}] : []}};`);
+  const query = 'fetchAlerts(missionConfig.crabbing.coords,[missionConfig.crabbing.alertWaterCoords])';
+  assert.equal((await run(query))[0].event, 'Small Craft Advisory');
+  assert.equal(run('calls.length'), 2);
+  run('fetchJson=async () => ({features:[{properties:marineAlert}]})');
+  assert.equal((await run(query)).length, 1);
+  run(`fetchJson=async url => {if(url.includes('37.79%2C')) throw new Error('Marine check failed');return {features:[]}}`);
+  await assert.rejects(run(query), /Marine check failed/);
+});
+
 test("Baker drift flags overlapping northeast phases without inventing hourly speeds", () => {
   const run = app();
   run(`var window = {date:new Date(2026,10,7),dayName:'Saturday',startHour:8,endHour:11};

@@ -80,6 +80,8 @@ const missionConfig = {
     spot: "China Beach",
     activity: "Paddleboard / kayak hoop-net crabbing",
     coords: { latitude: 37.7889, longitude: -122.4898 },
+    // NWS resolves the beach itself to land zones; also sample the water immediately north.
+    alertWaterCoords: { latitude: 37.7900, longitude: -122.4900 },
     cdfwCountyGroup: "all other counties",
     // Zone 3 spans 38 degrees 46.125 minutes N to Pigeon Point (37 degrees 11 minutes N).
     cdfwRampZone: "3",
@@ -262,7 +264,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v31";
+const CACHE_VERSION = "launch-window-v32";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -443,7 +445,7 @@ async function loadCrabbingData() {
       fetchTides({ station: sourceConfig.tides.station }),
       fetchNwsWeather(crabbing.coords),
       fetchMarineForecast(crabbing.coords),
-      fetchAlerts(crabbing.coords),
+      fetchAlerts(crabbing.coords, [crabbing.alertWaterCoords]),
       fetchDaylight(crabbing.coords),
       fetchCurrentPredictions()
     ]),
@@ -836,15 +838,20 @@ async function fetchOpenMeteoWind(coords) {
   }
 }
 
-async function fetchAlerts(coords) {
-  const params = new URLSearchParams({
-    point: `${coords.latitude},${coords.longitude}`
-  });
-  const data = await fetchJson(`${sourceConfig.nws.alertsUrl}?${params}`);
-  if (!Array.isArray(data.features) || data.features.some((feature) => !feature?.properties || typeof feature.properties.event !== "string")) {
-    throw new Error("NWS returned an invalid alert response");
+async function fetchAlerts(coords, additionalPoints = []) {
+  const alerts = new Map();
+  for (const point of [coords, ...additionalPoints]) {
+    const params = new URLSearchParams({ point: `${point.latitude},${point.longitude}` });
+    const data = await fetchJson(`${sourceConfig.nws.alertsUrl}?${params}`);
+    if (!Array.isArray(data.features) || data.features.some((feature) => !feature?.properties || typeof feature.properties.event !== "string")) {
+      throw new Error("NWS returned an invalid alert response");
+    }
+    for (const feature of data.features) {
+      const alert = feature.properties;
+      if (isRelevantWeekendAlert(alert)) alerts.set(alert.id || feature.id || JSON.stringify(alert), alert);
+    }
   }
-  return data.features.map((feature) => feature.properties).filter(isRelevantWeekendAlert);
+  return [...alerts.values()];
 }
 
 function isRelevantWeekendAlert(alert) {
