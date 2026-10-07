@@ -262,7 +262,7 @@ const appState = {
   }
 };
 
-const CACHE_VERSION = "launch-window-v30";
+const CACHE_VERSION = "launch-window-v31";
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 20000;
 const MAX_WEEKEND_OFFSET = 4;
@@ -494,7 +494,9 @@ async function fetchCurrentPredictions() {
       || String(row.Bin) !== sourceConfig.currents.bin || Number(row.Depth) !== sourceConfig.currents.depthFeet) {
       throw new Error("NOAA current prediction record could not be verified");
     }
-    return { time, speedKnots: Math.abs(speed), type: row.Type };
+    const direction = finiteValue(row.Type === "flood" ? row.meanFloodDir : row.meanEbbDir);
+    return { time, speedKnots: Math.abs(speed), type: row.Type,
+      directionDegrees: direction !== null && direction >= 0 && direction < 360 ? direction : null };
   });
   for (const date of [weekend.saturday, weekend.sunday]) {
     const types = new Set(predictions.filter((row) => row.time.startsWith(toIsoDate(date))).map((row) => row.type));
@@ -503,15 +505,51 @@ async function fetchCurrentPredictions() {
   return predictions;
 }
 
+function assessBakerDrift(currents, selectedWindow) {
+  const unknown = { title: "Baker Beach drift cannot be assessed", detail: "Current direction or full window coverage is unavailable." };
+  if (!Number.isFinite(selectedWindow?.startHour) || !Number.isFinite(selectedWindow?.endHour)) return unknown;
+  const start = new Date(selectedWindow.date);
+  const end = new Date(selectedWindow.date);
+  start.setHours(selectedWindow.startHour, 0, 0, 0);
+  end.setHours(selectedWindow.endHour, 0, 0, 0);
+  const rows = [...currents].sort((a, b) => a.time.localeCompare(b.time));
+  const phases = [];
+  // Max/slack predictions delimit a phase; they do not provide hourly speeds.
+  for (let i = 1; i < rows.length - 1; i++) {
+    const peak = rows[i];
+    if (peak.type === "slack" || rows[i - 1].type !== "slack" || rows[i + 1].type !== "slack") continue;
+    const from = new Date(rows[i - 1].time), until = new Date(rows[i + 1].time);
+    if (from < end && until > start) phases.push({ peak, from, until });
+  }
+  const toward = phases.filter(({ peak }) => Number.isFinite(peak.directionDegrees)
+    && peak.directionDegrees >= 0 && peak.directionDegrees <= 90);
+  if (toward.length) return {
+    title: "Possible drift toward Baker Beach",
+    detail: toward.map(({ peak, from, until }) => {
+      const overlapStart = new Date(Math.max(+start, +from));
+      const overlapEnd = new Date(Math.min(+end, +until));
+      const clock = (time) => new Date(time).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+      return `${selectedWindow.dayName} ${clock(overlapStart)}-${clock(overlapEnd)} Pacific: offshore ${peak.type} flows northeast (${peak.directionDegrees} degrees), broadly toward Baker Beach. This phase peaks at ${formatNumber(peak.speedKnots, " kn")} at ${formatTimeLabel(peak.time)}; that is not the speed throughout your window.`;
+    }).join(" ")
+  };
+  let coveredUntil = +start;
+  for (const phase of phases) {
+    if (!Number.isFinite(phase.peak.directionDegrees) || +phase.from > coveredUntil) return unknown;
+    coveredUntil = Math.max(coveredUntil, +phase.until);
+  }
+  if (coveredUntil < +end) return unknown;
+  return { title: "No northeast phase predicted in this window", detail: "The offshore reference does not flag flow toward Baker Beach during this window. This does not establish safe surface currents or an easy return to China Beach." };
+}
+
 function describeCrabbingCurrents(currents, selectedWindow) {
   const date = selectedWindow ? toIsoDate(new Date(selectedWindow.date)) : "";
   const rows = currents.filter((row) => row.time.startsWith(date));
-  const context = `${sourceConfig.currents.name}, station ${sourceConfig.currents.station}, bin ${sourceConfig.currents.bin}, ${sourceConfig.currents.depthFeet} ft depth. This is an offshore tidal-current reference, not surface flow at China Beach; route-specific return risk is not graded.`;
+  const context = `${sourceConfig.currents.name}, station ${sourceConfig.currents.station}, bin ${sourceConfig.currents.bin}, ${sourceConfig.currents.depthFeet} ft depth. This is an offshore tidal-current reference, not surface flow at China Beach. Whether it can overcome your return paddling is unknown; staying directly off China Beach is not assured by these predictions.`;
   if (!rows.length) return `No verified current predictions for this day. ${context}`;
   const ebb = maxNumber(rows.filter((row) => row.type === "ebb").map((row) => row.speedKnots));
   const flood = maxNumber(rows.filter((row) => row.type === "flood").map((row) => row.speedKnots));
   const slack = rows.filter((row) => row.type === "slack").map((row) => formatTimeLabel(row.time)).join(", ");
-  return `${selectedWindow.dayName} daily peak ebb ${formatNumber(ebb, " kn")}; peak flood ${formatNumber(flood, " kn")}. Slack predictions: ${slack} Pacific. ${context}`;
+  return `${assessBakerDrift(currents, selectedWindow).detail} ${selectedWindow.dayName} daily peak ebb ${formatNumber(ebb, " kn")}; peak flood ${formatNumber(flood, " kn")}. Slack predictions: ${slack} Pacific. ${context}`;
 }
 
 async function loadSpearfishingData() {
@@ -1440,7 +1478,7 @@ function evaluateCrabbing({ config, weather, marine, tides, alerts, cdfwCrabStat
     risks: {
       entryExit: !Number.isFinite(selectedWindow?.maxWave) ? "Wave forecast unavailable" : selectedWindow?.status === "go" ? "Within 5 ft limit" : selectedWindow?.status === "maybe" ? "Marginal window" : "High caution",
       windDrift: !Number.isFinite(selectedWindow?.maxWind) ? "Wind forecast unavailable" : selectedWindow.maxWind <= config.thresholds.go.maxWindMph ? "Lower morning drift" : "Return risk",
-      current: currents.length ? "Nearby predictions available; route risk unassessed" : "Current predictions unavailable",
+      current: assessBakerDrift(currents, selectedWindow).title,
       currentDetail: describeCrabbingCurrents(currents, selectedWindow),
       confidence: failedChecks.length ? "Required checks incomplete" : !selectedWindow?.complete ? "Forecast incomplete" : hasAdvisory ? `NWS alert: ${summarizeAlerts(alerts)}` : "Forecast screen complete"
     },
@@ -1495,6 +1533,8 @@ function buildCrabbingMorningWindows({ weather, marine, config, alerts = [], day
       return {
         date,
         timeLabel,
+        startHour,
+        endHour: expectedHours.length >= 3 ? 11 : null,
         sunrise: sun?.sunrise || null,
         dayName: date.toLocaleDateString(undefined, { weekday: "long" }),
         maxWind,

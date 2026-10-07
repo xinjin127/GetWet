@@ -118,11 +118,33 @@ test("NWS response errors are not interpreted as zero hazards", async () => {
   assert.equal((await run('fetchAlerts(missionConfig.crabbing.coords)')).length, 0);
 });
 
+test("Baker drift flags overlapping northeast phases without inventing hourly speeds", () => {
+  const run = app();
+  run(`var window = {date:new Date(2026,10,7),dayName:'Saturday',startHour:8,endHour:11};
+    var rows = [
+      {time:'2026-11-07T03:00',type:'slack',speedKnots:0},
+      {time:'2026-11-07T06:00',type:'flood',speedKnots:1.8,directionDegrees:38},
+      {time:'2026-11-07T12:00',type:'slack',speedKnots:0}
+    ];`);
+  assert.match(run('assessBakerDrift(rows,window).title'), /Possible drift toward Baker/);
+  assert.match(run('assessBakerDrift(rows,window).detail'), /1.8 kn/);
+  assert.match(run('assessBakerDrift(rows,window).detail'), /not the speed throughout/);
+  run('rows[1].directionDegrees=208; rows[1].type="ebb"');
+  assert.match(run('assessBakerDrift(rows,window).title'), /No northeast phase/);
+  assert.match(run('assessBakerDrift(rows,window).detail'), /does not establish safe/);
+  run('rows[1].directionDegrees=null');
+  assert.match(run('assessBakerDrift(rows,window).title'), /cannot be assessed/);
+  run('rows[1].directionDegrees=38; rows.pop()');
+  assert.match(run('assessBakerDrift(rows,window).title'), /cannot be assessed/);
+  run('window.startHour=null');
+  assert.match(run('assessBakerDrift(rows,window).title'), /cannot be assessed/);
+});
+
 test("NOAA current predictions preserve knots and reject missing or mismatched records", async () => {
   const run = app();
   run(`var cp = [7,8].flatMap(day => ['ebb','slack','flood'].map((Type,i) => ({
     Type, Time:'2026-11-0'+day+' '+String(i+6).padStart(2,'0')+':00',
-    Velocity_Major: i-1, Bin:'1', Depth:'31'
+    Velocity_Major: i-1, Bin:'1', Depth:'31', meanFloodDir:38, meanEbbDir:208
   })));
   var units = 'feet, knots';
   fetchJson = async () => ({current_predictions:{units,cp}});`);
@@ -130,6 +152,8 @@ test("NOAA current predictions preserve knots and reject missing or mismatched r
   assert.equal(data.length, 6);
   assert.equal(data[0].speedKnots, 1);
   assert.equal(data[1].speedKnots, 0);
+  assert.equal(data[0].directionDegrees, 208);
+  assert.equal(data[2].directionDegrees, 38);
   run("cp[0].Velocity_Major = null");
   await assert.rejects(run('fetchCurrentPredictions()'), /could not be verified/);
   run("cp[0].Velocity_Major = -1; cp[0].Depth = '50'");
